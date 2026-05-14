@@ -571,8 +571,22 @@ export function useMetaClean() {
           return { rc, err };
         };
 
-        phase = `exec (${inExt}→${outExt}, ${sameContainer ? "copy" : "encode"})`;
-        const first = await runExecWithRecovery(args);
+        // For WAV → non-WAV conversions, skip the direct attempt entirely.
+        // Suno/Udio WAVs reliably crash the one-shot encode mid-stream with
+        // "memory access out of bounds" (malformed RIFF LIST/INFO chunks),
+        // and the failure-detect + engine-reset round-trip costs ~30-60s of
+        // wasted work before the 2-pass route even starts. Going straight to
+        // 2-pass keeps total time roughly equal to a single encode while
+        // staying reliable for both Suno files and ordinary WAVs.
+        const forceTwoPass = inExt === "wav" && !sameContainer;
+
+        phase = forceTwoPass
+          ? `2-pass remux (${inExt}→clean wav)`
+          : `exec (${inExt}→${outExt}, ${sameContainer ? "copy" : "encode"})`;
+
+        const first = forceTwoPass
+          ? { rc: -1 as number, err: null as any }
+          : await runExecWithRecovery(args);
         let execErrorOnce: any = first.err;
         let rc = first.rc;
 
@@ -586,12 +600,14 @@ export function useMetaClean() {
           // isolates the demuxer from the encoder, which reliably works
           // even when the one-shot encode aborts.
           const canTwoPass = inExt === "wav" && !sameContainer;
-          console.error("ffmpeg first attempt failed", {
-            rc,
-            execErrorOnce,
-            log: getCapturedLog(15),
-            args,
-          });
+          if (!forceTwoPass) {
+            console.error("ffmpeg first attempt failed", {
+              rc,
+              execErrorOnce,
+              log: getCapturedLog(15),
+              args,
+            });
+          }
           if (canReencodeRetry) {
             phase = `retry exec (${inExt}→${outExt}, re-encode)`;
             const retry = args.filter((v, i, arr) => {
