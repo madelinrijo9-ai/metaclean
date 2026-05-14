@@ -1,23 +1,34 @@
 import { FFmpeg } from "@ffmpeg/ffmpeg";
-import { toBlobURL } from "@ffmpeg/util";
 
-async function resolveCoreUrl(url: string, mime: string): Promise<string> {
-  // Verify the asset is actually served (and not e.g. an SPA fallback HTML),
-  // then convert to a blob URL so the worker can import it cross-context.
-  const res = await fetch(url, { cache: "force-cache" });
+// Bump when @ffmpeg/core is upgraded — also acts as a cache-buster so users
+// with stale cached copies of the old UMD core file get the new ESM core.
+const CORE_VERSION = "0.12.10-esm-1";
+
+async function verifyAsset(url: string): Promise<void> {
+  // Cheap sanity check that fails fast with a clear, actionable message
+  // when the deployment misconfigures static serving (e.g. SPA fallback to
+  // index.html, or assets not copied into the build output).
+  let res: Response;
+  try {
+    res = await fetch(url, { method: "GET", cache: "force-cache" });
+  } catch (e) {
+    throw new Error(
+      `Could not fetch ${url}: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
   if (!res.ok) {
     throw new Error(
-      `Could not load ${url} (HTTP ${res.status}). The audio engine assets are missing from the deployment.`,
+      `Engine asset ${url} returned HTTP ${res.status}. The deployment is missing this file.`,
     );
   }
-  const ct = res.headers.get("content-type") || "";
+  const ct = (res.headers.get("content-type") || "").toLowerCase();
   if (ct.includes("text/html")) {
     throw new Error(
-      `${url} returned HTML instead of the engine script. The deployment is rewriting static asset requests to index.html.`,
+      `Engine asset ${url} returned HTML (content-type: ${ct}). The deployment is rewriting static-file requests to index.html.`,
     );
   }
-  const blob = new Blob([await res.arrayBuffer()], { type: mime });
-  return URL.createObjectURL(blob);
+  // Drain body so the browser caches it; the worker will refetch from cache.
+  await res.arrayBuffer();
 }
 
 let ffmpeg: FFmpeg | null = null;
@@ -56,19 +67,21 @@ export const getFFmpeg = async (
 
   if (!loadPromise) {
     loadPromise = (async () => {
-      // Serve ffmpeg-core from our own origin (vite public/) — much faster than unpkg
-      // and avoids the cross-origin slow-path entirely. Cached aggressively after first load.
+      // We ship the ESM build of @ffmpeg/core (which exports a `default` factory)
+      // because @ffmpeg/ffmpeg's worker is `type: "module"` and uses
+      // `(await import(coreURL)).default` to get the factory. The UMD build has
+      // no `export default` and would silently produce `failed to import ffmpeg-core.js`.
+      // Files are copied from node_modules into public/ffmpeg/ at build time.
       const baseURL = `${import.meta.env.BASE_URL}ffmpeg`;
-      // Use a verifying loader so we get a real error message if the deployment
-      // serves HTML instead of the script (SPA fallback misconfiguration).
-      const [coreURL, wasmURL] = await Promise.all([
-        resolveCoreUrl(`${baseURL}/ffmpeg-core.js`, "text/javascript"),
-        resolveCoreUrl(`${baseURL}/ffmpeg-core.wasm`, "application/wasm"),
-      ]);
+      const coreURL = `${baseURL}/ffmpeg-core.js?v=${CORE_VERSION}`;
+      const wasmURL = `${baseURL}/ffmpeg-core.wasm?v=${CORE_VERSION}`;
+
+      // Pre-flight: verify both assets are actually served as expected.
+      // Fails fast with a precise error if the deployment is broken.
+      await Promise.all([verifyAsset(coreURL), verifyAsset(wasmURL)]);
+
       await ffmpeg!.load({ coreURL, wasmURL });
       isLoaded = true;
-      // Suppress unused-import warning (kept available for future use).
-      void toBlobURL;
     })();
   }
 
