@@ -5,12 +5,30 @@ import JSZip from "jszip";
 
 export type FileStatus = "queued" | "reading" | "ready" | "cleaning" | "done" | "error";
 
+export interface CustomMetadata {
+  title?: string;
+  artist?: string;
+  album?: string;
+  albumArtist?: string;
+  year?: string;
+  genre?: string;
+  track?: string;
+  comment?: string;
+}
+
+export interface CoverArt {
+  file: File;
+  dataUrl: string;
+}
+
 export interface AudioFile {
   id: string;
   file: File;
   status: FileStatus;
   progress: number;
   metadata?: Record<string, string>;
+  customMetadata?: CustomMetadata;
+  coverArt?: CoverArt;
   cleanedBlob?: Blob;
   error?: string;
 }
@@ -20,14 +38,73 @@ export interface Options {
   removeCoverArt: boolean;
 }
 
+export const SUPPORTS_COVER_ART = new Set(["mp3", "flac", "m4a"]);
+
+export const getExt = (name: string) => (name.split(".").pop() || "").toLowerCase();
+
+const hasAnyCustom = (m?: CustomMetadata) =>
+  !!m && Object.values(m).some((v) => v && v.trim() !== "");
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
 export function useMetaClean() {
   const [files, setFiles] = useState<AudioFile[]>([]);
+  const filesRef = useRef<AudioFile[]>([]);
+  filesRef.current = files;
+
   const [options, setOptions] = useState<Options>({
     keepBasicTags: false,
     removeCoverArt: true,
   });
   const [isEngineLoading, setIsEngineLoading] = useState(false);
-  const isProcessingQueue = useRef(false);
+
+  const updateFile = useCallback((id: string, updates: Partial<AudioFile> | ((f: AudioFile) => Partial<AudioFile>)) => {
+    setFiles((prev) =>
+      prev.map((f) => {
+        if (f.id !== id) return f;
+        const u = typeof updates === "function" ? updates(f) : updates;
+        return { ...f, ...u };
+      })
+    );
+  }, []);
+
+  const readMetadata = useCallback(async (id: string, file: File) => {
+    updateFile(id, { status: "reading" });
+    try {
+      const ffmpeg = await getFFmpeg();
+      const inputName = `in_${id}_${file.name}`;
+      await ffmpeg.writeFile(inputName, await fetchFile(file));
+
+      try {
+        await ffmpeg.exec(["-i", inputName, "-f", "ffmetadata", "metadata.txt"]);
+      } catch {}
+
+      let metadataStr = "";
+      try {
+        const metadataData = await ffmpeg.readFile("metadata.txt");
+        metadataStr = new TextDecoder().decode(metadataData as Uint8Array);
+      } catch {}
+
+      const parsed = parseFFmetadata(metadataStr);
+
+      try {
+        await ffmpeg.deleteFile(inputName);
+        await ffmpeg.deleteFile("metadata.txt");
+      } catch {}
+
+      updateFile(id, { status: "ready", metadata: parsed });
+    } catch (err: any) {
+      console.error(err);
+      updateFile(id, { status: "error", error: err.message || "Failed to read metadata" });
+    }
+  }, [updateFile]);
 
   const addFiles = useCallback(async (newFiles: File[]) => {
     const audioFiles: AudioFile[] = newFiles.map((file) => ({
@@ -39,7 +116,6 @@ export function useMetaClean() {
 
     setFiles((prev) => [...prev, ...audioFiles]);
 
-    // Initialize ffmpeg if not loaded
     setIsEngineLoading(true);
     try {
       await getFFmpeg();
@@ -49,77 +125,97 @@ export function useMetaClean() {
       setIsEngineLoading(false);
     }
 
-    // Process metadata reads in background
     for (const af of audioFiles) {
-      readMetadata(af.id, af.file);
+      await readMetadata(af.id, af.file);
     }
-  }, []);
+  }, [readMetadata]);
 
   const removeFile = useCallback((id: string) => {
     setFiles((prev) => prev.filter((f) => f.id !== id));
   }, []);
 
-  const updateFile = useCallback((id: string, updates: Partial<AudioFile>) => {
+  const setCustomMetadata = useCallback((id: string, patch: Partial<CustomMetadata>) => {
+    updateFile(id, (f) => ({
+      customMetadata: { ...(f.customMetadata ?? {}), ...patch },
+    }));
+  }, [updateFile]);
+
+  const setCoverArt = useCallback(async (id: string, file: File) => {
+    const dataUrl = await readFileAsDataUrl(file);
+    updateFile(id, { coverArt: { file, dataUrl } });
+  }, [updateFile]);
+
+  const clearCoverArt = useCallback((id: string) => {
+    updateFile(id, { coverArt: undefined });
+  }, [updateFile]);
+
+  const applyToAll = useCallback(async (sourceId: string) => {
+    const src = filesRef.current.find((f) => f.id === sourceId);
+    if (!src) return;
     setFiles((prev) =>
-      prev.map((f) => (f.id === id ? { ...f, ...updates } : f))
+      prev.map((f) =>
+        f.id === sourceId
+          ? f
+          : {
+              ...f,
+              customMetadata: src.customMetadata ? { ...src.customMetadata } : undefined,
+              coverArt: src.coverArt ? { ...src.coverArt } : undefined,
+            }
+      )
     );
   }, []);
 
-  const readMetadata = async (id: string, file: File) => {
-    updateFile(id, { status: "reading" });
-    try {
-      const ffmpeg = await getFFmpeg();
-      const inputName = `in_${id}_${file.name}`;
-      await ffmpeg.writeFile(inputName, await fetchFile(file));
-
-      await ffmpeg.exec(["-i", inputName, "-f", "ffmetadata", "metadata.txt"]);
-      
-      let metadataStr = "";
-      try {
-        const metadataData = await ffmpeg.readFile("metadata.txt");
-        metadataStr = new TextDecoder().decode(metadataData as Uint8Array);
-      } catch (e) {
-        // metadata.txt might not exist if file has no tags
-      }
-
-      const parsed = parseFFmetadata(metadataStr);
-      
-      // Attempt to clean up FFmpeg file system
-      try {
-        await ffmpeg.deleteFile(inputName);
-        await ffmpeg.deleteFile("metadata.txt");
-      } catch (e) {}
-
-      updateFile(id, { status: "ready", metadata: parsed });
-    } catch (err: any) {
-      console.error(err);
-      updateFile(id, { status: "error", error: err.message || "Failed to read metadata" });
-    }
-  };
-
-  const cleanFile = async (id: string) => {
-    const fileToClean = files.find((f) => f.id === id);
-    if (!fileToClean || fileToClean.status === "cleaning" || fileToClean.status === "done") return;
+  const cleanFile = useCallback(async (id: string) => {
+    const fileToClean = filesRef.current.find((f) => f.id === id);
+    if (!fileToClean) return;
+    if (fileToClean.status === "cleaning" || fileToClean.status === "done") return;
 
     updateFile(id, { status: "cleaning", progress: 0 });
 
     try {
       const ffmpeg = await getFFmpeg((progress) => {
-        updateFile(id, { progress: progress * 100 });
+        updateFile(id, { progress: Math.min(100, progress * 100) });
       });
 
-      const ext = fileToClean.file.name.split('.').pop() || 'mp3';
+      const ext = (fileToClean.file.name.split(".").pop() || "mp3").toLowerCase();
       const inputName = `clean_in_${id}.${ext}`;
       const outputName = `clean_out_${id}.${ext}`;
 
       await ffmpeg.writeFile(inputName, await fetchFile(fileToClean.file));
 
-      const args = ["-i", inputName];
-      
-      // Strip metadata
+      const customs = hasAnyCustom(fileToClean.customMetadata) ? fileToClean.customMetadata! : undefined;
+      const wantsCover = !!fileToClean.coverArt && SUPPORTS_COVER_ART.has(ext);
+
+      let coverName: string | null = null;
+      if (wantsCover && fileToClean.coverArt) {
+        const cExt = fileToClean.coverArt.file.name.split(".").pop()?.toLowerCase() || "jpg";
+        coverName = `cover_${id}.${cExt}`;
+        await ffmpeg.writeFile(coverName, await fetchFile(fileToClean.coverArt.file));
+      }
+
+      const args: string[] = ["-i", inputName];
+      if (coverName) args.push("-i", coverName);
+
       args.push("-map_metadata", "-1");
 
-      if (options.keepBasicTags && fileToClean.metadata) {
+      if (coverName) {
+        args.push("-map", "0:a", "-map", "1:0");
+      } else if (options.removeCoverArt) {
+        args.push("-vn");
+      }
+      // else: leave default mapping so existing cover art (if any) is preserved
+
+      // Apply custom metadata (overrides keep-basic option)
+      if (customs) {
+        if (customs.title) args.push("-metadata", `title=${customs.title}`);
+        if (customs.artist) args.push("-metadata", `artist=${customs.artist}`);
+        if (customs.album) args.push("-metadata", `album=${customs.album}`);
+        if (customs.albumArtist) args.push("-metadata", `album_artist=${customs.albumArtist}`);
+        if (customs.year) args.push("-metadata", `date=${customs.year}`);
+        if (customs.genre) args.push("-metadata", `genre=${customs.genre}`);
+        if (customs.track) args.push("-metadata", `track=${customs.track}`);
+        if (customs.comment) args.push("-metadata", `comment=${customs.comment}`);
+      } else if (options.keepBasicTags && fileToClean.metadata) {
         if (fileToClean.metadata.title) args.push("-metadata", `title=${fileToClean.metadata.title}`);
         if (fileToClean.metadata.artist) args.push("-metadata", `artist=${fileToClean.metadata.artist}`);
         if (fileToClean.metadata.album) args.push("-metadata", `album=${fileToClean.metadata.album}`);
@@ -127,11 +223,16 @@ export function useMetaClean() {
 
       args.push("-c", "copy");
 
-      if (options.removeCoverArt) {
-        args.push("-vn");
+      if (coverName) {
+        args.push("-disposition:v", "attached_pic");
+        args.push("-metadata:s:v", "title=Album cover");
+        args.push("-metadata:s:v", "comment=Cover (front)");
+        if (ext === "mp3") {
+          args.push("-id3v2_version", "3");
+        }
       }
 
-      if (ext.toLowerCase() === "m4a" || ext.toLowerCase() === "aac") {
+      if (ext === "m4a") {
         args.push("-movflags", "+faststart");
       }
 
@@ -140,96 +241,62 @@ export function useMetaClean() {
       await ffmpeg.exec(args);
 
       const outData = await ffmpeg.readFile(outputName);
-      const blob = new Blob([outData as Uint8Array], { type: fileToClean.file.type });
+      const u8 = outData as Uint8Array;
+      const buf = u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength) as ArrayBuffer;
+      const blob = new Blob([buf], { type: fileToClean.file.type });
 
       try {
         await ffmpeg.deleteFile(inputName);
         await ffmpeg.deleteFile(outputName);
-      } catch (e) {}
+        if (coverName) await ffmpeg.deleteFile(coverName);
+      } catch {}
 
       updateFile(id, { status: "done", progress: 100, cleanedBlob: blob });
     } catch (err: any) {
       console.error(err);
       updateFile(id, { status: "error", error: err.message || "Failed to clean file" });
     }
-  };
+  }, [options, updateFile]);
 
-  const processQueue = async () => {
-    if (isProcessingQueue.current) return;
-    isProcessingQueue.current = true;
-
-    try {
-      // Find all ready files and process them sequentially
-      let currentFiles = files;
-      while (true) {
-        // Need to get fresh state to see what's queued/ready
-        // We capture state changes in the while loop by calling a ref or using a state accessor pattern
-        // Here we just use the cleanFile which will handle the file state updates directly.
-        // Let's use a simpler approach: process all currently queued/ready files
-        
-        // This requires access to the latest files state
-        // For simplicity in the hook, let's just trigger all ready/queued files sequentially
-        const pendingFile = currentFiles.find(f => f.status === "queued" || f.status === "ready");
-        if (!pendingFile) break;
-        
-        await cleanFile(pendingFile.id);
-        
-        // Wait a bit to let React update state
-        await new Promise(r => setTimeout(r, 100));
-        
-        // Note: this simple loop might need to refetch `files` via a ref if the user adds more,
-        // but it works for processing the current batch.
-        break; // Simplified: user will use "Clean All" to trigger a batch. 
-      }
-    } finally {
-      isProcessingQueue.current = false;
-    }
-  };
-
-  const cleanAll = async () => {
-    // Collect all IDs that need cleaning
-    // Since ffmpeg is single-instance, we must await sequentially
-    // Use files from a ref to ensure we don't capture stale closures,
-    // or just run through the current files list.
-    const toClean = files.filter(f => f.status === "queued" || f.status === "ready").map(f => f.id);
-    
+  const cleanAll = useCallback(async () => {
+    const toClean = filesRef.current
+      .filter((f) => f.status === "queued" || f.status === "ready")
+      .map((f) => f.id);
     for (const id of toClean) {
       await cleanFile(id);
     }
-  };
+  }, [cleanFile]);
 
-  const downloadFile = (id: string) => {
-    const file = files.find(f => f.id === id);
+  const downloadFile = useCallback((id: string) => {
+    const file = filesRef.current.find((f) => f.id === id);
     if (!file || !file.cleanedBlob) return;
 
     const url = URL.createObjectURL(file.cleanedBlob);
     const a = document.createElement("a");
     a.href = url;
-    
-    // `<originalname>-clean.<ext>`
+
     const lastDot = file.file.name.lastIndexOf(".");
     const base = lastDot !== -1 ? file.file.name.substring(0, lastDot) : file.file.name;
     const ext = lastDot !== -1 ? file.file.name.substring(lastDot) : "";
-    
+
     a.download = `${base}-clean${ext}`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  };
+  }, []);
 
-  const downloadAll = async () => {
-    const doneFiles = files.filter(f => f.status === "done" && f.cleanedBlob);
+  const downloadAll = useCallback(async () => {
+    const doneFiles = filesRef.current.filter((f) => f.status === "done" && f.cleanedBlob);
     if (doneFiles.length === 0) return;
-    
+
     if (doneFiles.length === 1) {
       downloadFile(doneFiles[0].id);
       return;
     }
 
     const zip = new JSZip();
-    
-    doneFiles.forEach(file => {
+    doneFiles.forEach((file) => {
       const lastDot = file.file.name.lastIndexOf(".");
       const base = lastDot !== -1 ? file.file.name.substring(0, lastDot) : file.file.name;
       const ext = lastDot !== -1 ? file.file.name.substring(lastDot) : "";
@@ -245,7 +312,7 @@ export function useMetaClean() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  };
+  }, [downloadFile]);
 
   return {
     files,
@@ -258,5 +325,9 @@ export function useMetaClean() {
     cleanAll,
     downloadFile,
     downloadAll,
+    setCustomMetadata,
+    setCoverArt,
+    clearCoverArt,
+    applyToAll,
   };
 }

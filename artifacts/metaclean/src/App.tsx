@@ -3,8 +3,9 @@ import { Upload, FileAudio, Settings2, Download, Trash2, CheckCircle2, Play, Cir
 import { useDropzone } from "react-dropzone";
 import { motion, AnimatePresence } from "framer-motion";
 import { formatBytes } from "@/lib/utils";
-import { useMetaClean, AudioFile } from "@/hooks/use-metaclean";
+import { useMetaClean, AudioFile, CustomMetadata } from "@/hooks/use-metaclean";
 import { ThemeProvider, useTheme } from "@/components/theme-provider";
+import { MetadataEditor } from "@/components/metadata-editor";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -75,16 +76,26 @@ function DropZone({ onDrop }: { onDrop: (files: File[]) => void }) {
 
 function FileRow({ 
   file, 
+  totalFiles,
   onRemove, 
   onClean, 
   onDownload,
-  options
+  options,
+  onCustomChange,
+  onCoverArt,
+  onClearCoverArt,
+  onApplyToAll,
 }: { 
   file: AudioFile; 
+  totalFiles: number;
   onRemove: (id: string) => void;
   onClean: (id: string) => void;
   onDownload: (id: string) => void;
   options: { keepBasicTags: boolean; removeCoverArt: boolean };
+  onCustomChange: (id: string, patch: Partial<CustomMetadata>) => void;
+  onCoverArt: (id: string, file: File) => void;
+  onClearCoverArt: (id: string) => void;
+  onApplyToAll: (id: string) => void;
 }) {
   const isDone = file.status === "done";
   const isCleaning = file.status === "cleaning";
@@ -196,6 +207,17 @@ function FileRow({
           {file.error}
         </div>
       )}
+
+      {!isError && file.status !== "reading" && (
+        <MetadataEditor
+          file={file}
+          totalFiles={totalFiles}
+          onChange={onCustomChange}
+          onCoverArt={onCoverArt}
+          onClearCoverArt={onClearCoverArt}
+          onApplyToAll={onApplyToAll}
+        />
+      )}
     </motion.div>
   );
 }
@@ -211,7 +233,11 @@ function MainApp() {
     cleanFile, 
     cleanAll, 
     downloadFile, 
-    downloadAll 
+    downloadAll,
+    setCustomMetadata,
+    setCoverArt,
+    clearCoverArt,
+    applyToAll,
   } = useMetaClean();
 
   const canCleanAll = files.some(f => f.status === "ready" || f.status === "queued");
@@ -339,10 +365,15 @@ function MainApp() {
                   <FileRow 
                     key={file.id} 
                     file={file} 
+                    totalFiles={files.length}
                     onRemove={removeFile}
                     onClean={cleanFile}
                     onDownload={downloadFile}
                     options={options}
+                    onCustomChange={setCustomMetadata}
+                    onCoverArt={setCoverArt}
+                    onClearCoverArt={clearCoverArt}
+                    onApplyToAll={applyToAll}
                   />
                 ))}
               </AnimatePresence>
