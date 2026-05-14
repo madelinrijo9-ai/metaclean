@@ -13,6 +13,7 @@ import {
   encoderSpoofArgs,
   type OutputFormat,
 } from "@/lib/ffmpeg";
+import { parseWavToPcm, pcmFormatFlag, type WavInfo } from "@/lib/wav";
 
 // Reset the ffmpeg.wasm engine after this much cumulative input has been
 // processed. The WASM heap doesn't shrink between encodes, so long queues of
@@ -412,7 +413,6 @@ export function useMetaClean() {
         let ffmpeg = await loadEngine();
 
         const inExt = getExt(fileToClean.file.name);
-        const inputName = `in_${id.slice(0, 8)}.${inExt || "bin"}`;
 
         const outFmt: Exclude<OutputFormat, "same"> =
           fileToClean.outputFormat === "same"
@@ -423,8 +423,49 @@ export function useMetaClean() {
         const outputName = `out_${id.slice(0, 8)}.${outExt}`;
         const sameContainer = inExt === outExt;
 
-        phase = `write input (${inExt || "?"}, ${fileToClean.file.size}b)`;
-        await ffmpeg.writeFile(inputName, await fetchFile(fileToClean.file));
+        // For WAV inputs we parse the RIFF header in JS and feed only the
+        // raw PCM payload to ffmpeg via `-f <pcm-format> -ar N -ac N`. This
+        // bypasses ffmpeg's WAV demuxer entirely, which is the only reliable
+        // way to handle Suno/Udio WAVs — those files embed malformed LIST/INFO
+        // chunks that crash libavformat with "memory access out of bounds"
+        // regardless of `-err_detect` / `-fflags +discardcorrupt`.
+        // Same-format WAV→WAV stays on the regular path (no decode needed).
+        let useRawPcm = false;
+        let rawWav: WavInfo | null = null;
+        let rawPcmFmt: string | null = null;
+        if (inExt === "wav" && !sameContainer) {
+          phase = "parse wav header";
+          try {
+            rawWav = await parseWavToPcm(fileToClean.file);
+            rawPcmFmt = pcmFormatFlag(rawWav.formatTag, rawWav.bitDepth);
+            if (rawPcmFmt) {
+              useRawPcm = true;
+            } else {
+              console.warn(
+                "[MetaClean] WAV format unsupported for raw-PCM path; falling back to demuxer",
+                { formatTag: rawWav.formatTag, bitDepth: rawWav.bitDepth }
+              );
+            }
+          } catch (e) {
+            console.warn(
+              "[MetaClean] Could not parse WAV header in JS; falling back to demuxer",
+              e
+            );
+          }
+        }
+
+        const inputName = useRawPcm
+          ? `raw_${id.slice(0, 8)}.pcm`
+          : `in_${id.slice(0, 8)}.${inExt || "bin"}`;
+
+        phase = `write input (${useRawPcm ? "raw pcm" : inExt || "?"}, ${
+          useRawPcm ? rawWav!.pcmBytes.byteLength : fileToClean.file.size
+        }b)`;
+        if (useRawPcm) {
+          await ffmpeg.writeFile(inputName, rawWav!.pcmBytes);
+        } else {
+          await ffmpeg.writeFile(inputName, await fetchFile(fileToClean.file));
+        }
 
         const customs = hasAnyCustom(fileToClean.customMetadata)
           ? fileToClean.customMetadata!
@@ -441,21 +482,29 @@ export function useMetaClean() {
           await ffmpeg.writeFile(coverName, await fetchFile(fileToClean.coverArt.file));
         }
 
-        // Be lenient with malformed input headers/chunks. Suno/Udio WAVs
-        // commonly embed unusual LIST/INFO chunks with metadata; without these
-        // flags ffmpeg's WAV demuxer can try to allocate buffers based on
-        // bogus chunk-size fields and crash with "memory access out of bounds".
         const args: string[] = [];
-        args.push("-err_detect", "ignore_err");
-        args.push("-fflags", "+discardcorrupt");
+        if (useRawPcm) {
+          // Headerless raw PCM input — no demuxer, no chance of OOB on chunks.
+          args.push("-f", rawPcmFmt!);
+          args.push("-ar", String(rawWav!.sampleRate));
+          args.push("-ac", String(rawWav!.channels));
+        } else {
+          // Be lenient with malformed input headers/chunks (e.g. odd MP3
+          // frames, broken FLAC seektables). Cheap insurance.
+          args.push("-err_detect", "ignore_err");
+          args.push("-fflags", "+discardcorrupt");
+        }
         args.push("-i", inputName);
         if (coverName) args.push("-i", coverName);
 
         // Strip all metadata first
         args.push("-map_metadata", "-1");
 
-        // Stream mapping — always explicit so behavior is deterministic
+        // Stream mapping — always explicit so behavior is deterministic.
+        // Raw PCM has no embedded cover stream, so preserve-original is
+        // never applicable on that path.
         const preserveOriginalCover =
+          !useRawPcm &&
           !coverName &&
           !options.removeCoverArt &&
           FORMATS[outFmt].supportsCoverArt &&
@@ -550,8 +599,13 @@ export function useMetaClean() {
             } catch {}
             bytesSinceResetRef.current = 0;
             ffmpeg = await loadEngine();
-            // Re-upload inputs into the fresh MEMFS
-            await ffmpeg.writeFile(inputName, await fetchFile(fileToClean.file));
+            // Re-upload inputs into the fresh MEMFS. Use the same raw-PCM
+            // bytes for WAV inputs so the recovered run skips the demuxer too.
+            if (useRawPcm && rawWav) {
+              await ffmpeg.writeFile(inputName, rawWav.pcmBytes);
+            } else {
+              await ffmpeg.writeFile(inputName, await fetchFile(fileToClean.file));
+            }
             if (coverName && fileToClean.coverArt) {
               await ffmpeg.writeFile(
                 coverName,
@@ -571,43 +625,23 @@ export function useMetaClean() {
           return { rc, err };
         };
 
-        // For WAV → non-WAV conversions, skip the direct attempt entirely.
-        // Suno/Udio WAVs reliably crash the one-shot encode mid-stream with
-        // "memory access out of bounds" (malformed RIFF LIST/INFO chunks),
-        // and the failure-detect + engine-reset round-trip costs ~30-60s of
-        // wasted work before the 2-pass route even starts. Going straight to
-        // 2-pass keeps total time roughly equal to a single encode while
-        // staying reliable for both Suno files and ordinary WAVs.
-        const forceTwoPass = inExt === "wav" && !sameContainer;
-
-        phase = forceTwoPass
-          ? `2-pass remux (${inExt}→clean wav)`
-          : `exec (${inExt}→${outExt}, ${sameContainer ? "copy" : "encode"})`;
-
-        const first = forceTwoPass
-          ? { rc: -1 as number, err: null as any }
-          : await runExecWithRecovery(args);
-        let execErrorOnce: any = first.err;
+        phase = `exec (${useRawPcm ? "raw pcm" : inExt}→${outExt}, ${
+          sameContainer ? "copy" : "encode"
+        })`;
+        const first = await runExecWithRecovery(args);
+        const execErrorOnce: any = first.err;
         let rc = first.rc;
 
         if (rc !== 0) {
-          // Always retry once for lossless same-container with explicit re-encode.
-          // Suno/Udio WAVs often have non-standard chunks that break -c:a copy.
+          // Same-container lossless can fall back to an explicit re-encode
+          // (Suno/Udio WAVs sometimes break `-c:a copy` even when remuxed).
           const canReencodeRetry = sameContainer && FORMATS[outFmt].lossless;
-          // 2-pass fallback for cross-format conversions from WAV: many
-          // Suno/Udio files crash the direct encode (likely malformed RIFF
-          // chunks). Re-muxing through clean s16le PCM in MEMFS first
-          // isolates the demuxer from the encoder, which reliably works
-          // even when the one-shot encode aborts.
-          const canTwoPass = inExt === "wav" && !sameContainer;
-          if (!forceTwoPass) {
-            console.error("ffmpeg first attempt failed", {
-              rc,
-              execErrorOnce,
-              log: getCapturedLog(15),
-              args,
-            });
-          }
+          console.error("ffmpeg first attempt failed", {
+            rc,
+            execErrorOnce,
+            log: getCapturedLog(15),
+            args,
+          });
           if (canReencodeRetry) {
             phase = `retry exec (${inExt}→${outExt}, re-encode)`;
             const retry = args.filter((v, i, arr) => {
@@ -623,75 +657,6 @@ export function useMetaClean() {
               const last = tail.split("\n").filter(Boolean).slice(-2).join(" | ");
               throw new Error(
                 `ffmpeg retry exited ${second.rc}${last ? ` — ${last}` : ""}`
-              );
-            }
-          } else if (canTwoPass) {
-            // Pass 1: input.wav → clean.wav (strip junk chunks, normalize PCM)
-            const cleanName = `clean_${id.slice(0, 8)}.wav`;
-            phase = `2-pass remux (${inExt}→clean wav)`;
-            const remuxArgs = [
-              "-err_detect", "ignore_err",
-              "-fflags", "+discardcorrupt+bitexact",
-              "-i", inputName,
-              "-map", "0:a:0",
-              "-map_metadata", "-1",
-              "-c:a", "pcm_s16le",
-              "-f", "wav",
-              "-y", cleanName,
-            ];
-            const remux = await runExecWithRecovery(remuxArgs);
-            if (remux.rc !== 0) {
-              const tail = getCapturedLog(20);
-              const last = tail.split("\n").filter(Boolean).slice(-2).join(" | ");
-              throw new Error(
-                `2-pass remux failed (rc ${remux.rc})${last ? ` — ${last}` : ""}`
-              );
-            }
-            // Pass 2: clean.wav → output.<fmt> using the original args, but
-            // with the input swapped to the clean intermediate. Drop the
-            // lenient input flags (they did their job in pass 1) and the
-            // original input cover-stream mapping (clean.wav has audio only).
-            phase = `2-pass encode (clean wav→${outExt})`;
-            const pass2: string[] = ["-i", cleanName];
-            if (coverName) pass2.push("-i", coverName);
-            pass2.push("-map_metadata", "-1");
-            pass2.push("-map", "0:a:0");
-            if (coverName) pass2.push("-map", "1:0");
-            // Re-apply tags
-            if (customs) {
-              if (customs.title) pass2.push("-metadata", `title=${customs.title}`);
-              if (customs.artist) pass2.push("-metadata", `artist=${customs.artist}`);
-              if (customs.album) pass2.push("-metadata", `album=${customs.album}`);
-              if (customs.albumArtist) pass2.push("-metadata", `album_artist=${customs.albumArtist}`);
-              if (customs.year) pass2.push("-metadata", `date=${customs.year}`);
-              if (customs.genre) pass2.push("-metadata", `genre=${customs.genre}`);
-              if (customs.track) pass2.push("-metadata", `track=${customs.track}`);
-              if (customs.comment) pass2.push("-metadata", `comment=${customs.comment}`);
-            } else if (options.keepBasicTags && fileToClean.metadata) {
-              if (fileToClean.metadata.title) pass2.push("-metadata", `title=${fileToClean.metadata.title}`);
-              if (fileToClean.metadata.artist) pass2.push("-metadata", `artist=${fileToClean.metadata.artist}`);
-              if (fileToClean.metadata.album) pass2.push("-metadata", `album=${fileToClean.metadata.album}`);
-            }
-            pass2.push(...codecArgsFor(outFmt, fileToClean.outputBitrate));
-            if (coverName) {
-              pass2.push(...coverCodecFor(outFmt));
-              pass2.push("-disposition:v", "attached_pic");
-              pass2.push("-metadata:s:v", "title=Album cover");
-              pass2.push("-metadata:s:v", "comment=Cover (front)");
-              if (outExt === "mp3") pass2.push("-id3v2_version", "3");
-            }
-            if (outExt === "m4a") pass2.push("-movflags", "+faststart");
-            pass2.push(...encoderSpoofArgs(options.encoderSpoof));
-            pass2.push("-y", outputName);
-            const second = await runExecWithRecovery(pass2);
-            try {
-              await ffmpeg.deleteFile(cleanName);
-            } catch {}
-            if (second.rc !== 0) {
-              const tail = getCapturedLog(20);
-              const last = tail.split("\n").filter(Boolean).slice(-2).join(" | ");
-              throw new Error(
-                `2-pass encode failed (rc ${second.rc})${last ? ` — ${last}` : ""}`
               );
             }
           } else {
