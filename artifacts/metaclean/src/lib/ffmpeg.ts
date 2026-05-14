@@ -1,6 +1,25 @@
 import { FFmpeg } from "@ffmpeg/ffmpeg";
 import { toBlobURL } from "@ffmpeg/util";
 
+async function resolveCoreUrl(url: string, mime: string): Promise<string> {
+  // Verify the asset is actually served (and not e.g. an SPA fallback HTML),
+  // then convert to a blob URL so the worker can import it cross-context.
+  const res = await fetch(url, { cache: "force-cache" });
+  if (!res.ok) {
+    throw new Error(
+      `Could not load ${url} (HTTP ${res.status}). The audio engine assets are missing from the deployment.`,
+    );
+  }
+  const ct = res.headers.get("content-type") || "";
+  if (ct.includes("text/html")) {
+    throw new Error(
+      `${url} returned HTML instead of the engine script. The deployment is rewriting static asset requests to index.html.`,
+    );
+  }
+  const blob = new Blob([await res.arrayBuffer()], { type: mime });
+  return URL.createObjectURL(blob);
+}
+
 let ffmpeg: FFmpeg | null = null;
 let isLoaded = false;
 let loadPromise: Promise<void> | null = null;
@@ -40,11 +59,16 @@ export const getFFmpeg = async (
       // Serve ffmpeg-core from our own origin (vite public/) — much faster than unpkg
       // and avoids the cross-origin slow-path entirely. Cached aggressively after first load.
       const baseURL = `${import.meta.env.BASE_URL}ffmpeg`;
-      await ffmpeg!.load({
-        coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, "text/javascript"),
-        wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, "application/wasm"),
-      });
+      // Use a verifying loader so we get a real error message if the deployment
+      // serves HTML instead of the script (SPA fallback misconfiguration).
+      const [coreURL, wasmURL] = await Promise.all([
+        resolveCoreUrl(`${baseURL}/ffmpeg-core.js`, "text/javascript"),
+        resolveCoreUrl(`${baseURL}/ffmpeg-core.wasm`, "application/wasm"),
+      ]);
+      await ffmpeg!.load({ coreURL, wasmURL });
       isLoaded = true;
+      // Suppress unused-import warning (kept available for future use).
+      void toBlobURL;
     })();
   }
 
