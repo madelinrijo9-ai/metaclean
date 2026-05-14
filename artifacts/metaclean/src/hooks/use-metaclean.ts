@@ -272,6 +272,24 @@ export function useMetaClean() {
     [updateFile]
   );
 
+  const setCoverArtFromDataUrl = useCallback(
+    async (id: string, dataUrl: string, fileName = "cover.jpg") => {
+      try {
+        if (!dataUrl.startsWith("data:")) {
+          throw new Error("Invalid data URL");
+        }
+        const res = await fetch(dataUrl);
+        const blob = await res.blob();
+        const file = new File([blob], fileName, { type: blob.type || "image/jpeg" });
+        updateFile(id, { coverArt: { file, dataUrl } });
+      } catch (err) {
+        console.error("Failed to set cover art from data URL", err);
+        throw err;
+      }
+    },
+    [updateFile]
+  );
+
   const clearCoverArt = useCallback(
     (id: string) => {
       updateFile(id, { coverArt: undefined });
@@ -542,6 +560,7 @@ export function useMetaClean() {
     downloadAll,
     setCustomMetadata,
     setCoverArt,
+    setCoverArtFromDataUrl,
     clearCoverArt,
     applyToAll,
     setOutputFormat,

@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { Image as ImageIcon, X, CopyCheck, ChevronDown, FileMusic } from "lucide-react";
+import { Image as ImageIcon, X, CopyCheck, ChevronDown, FileMusic, User, UserPlus } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -17,27 +17,36 @@ import {
   type CustomMetadata,
 } from "@/hooks/use-metaclean";
 import { FORMATS, type OutputFormat } from "@/lib/ffmpeg";
+import type { Artist } from "@/lib/artists";
 
 interface Props {
   file: AudioFile;
   totalFiles: number;
+  artists: Artist[];
   onChange: (id: string, patch: Partial<CustomMetadata>) => void;
   onCoverArt: (id: string, file: File) => void;
   onClearCoverArt: (id: string) => void;
   onApplyToAll: (id: string) => void;
   onSetFormat: (id: string, fmt: OutputFormat) => void;
   onSetBitrate: (id: string, br: number | undefined) => void;
+  onApplyArtist: (id: string, artistId: string) => void;
+  onApplyArtistToAll: (artistId: string) => void;
+  onOpenArtistManager: () => void;
 }
 
 export function MetadataEditor({
   file,
   totalFiles,
+  artists,
   onChange,
   onCoverArt,
   onClearCoverArt,
   onApplyToAll,
   onSetFormat,
   onSetBitrate,
+  onApplyArtist,
+  onApplyArtistToAll,
+  onOpenArtistManager,
 }: Props) {
   const [open, setOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -184,6 +193,74 @@ export function MetadataEditor({
               </div>
 
               <div className="space-y-4">
+                <div className="rounded-md border border-primary/20 bg-primary/5 p-3 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <Label className="text-[11px] font-medium text-primary uppercase tracking-wider flex items-center gap-1.5">
+                      <User className="w-3 h-3" /> Apply artist
+                    </Label>
+                    <button
+                      type="button"
+                      onClick={onOpenArtistManager}
+                      className="text-[11px] text-muted-foreground hover:text-foreground inline-flex items-center gap-1"
+                    >
+                      <UserPlus className="w-3 h-3" /> Manage
+                    </button>
+                  </div>
+                  {artists.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">
+                      Save an artist with their cover & defaults, then apply it here in one click — title is auto-derived from the filename.
+                    </p>
+                  ) : (
+                    <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+                      <Select
+                        value=""
+                        onValueChange={(v) => onApplyArtist(file.id, v)}
+                      >
+                        <SelectTrigger className="w-full">
+                          <SelectValue placeholder="Pick an artist…" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {artists.map((a) => (
+                            <SelectItem key={a.id} value={a.id}>
+                              <span className="flex items-center gap-2">
+                                {a.coverDataUrl ? (
+                                  <img
+                                    src={a.coverDataUrl}
+                                    alt=""
+                                    className="w-5 h-5 rounded object-cover"
+                                  />
+                                ) : (
+                                  <span className="w-5 h-5 rounded bg-accent flex items-center justify-center">
+                                    <User className="w-3 h-3 text-muted-foreground" />
+                                  </span>
+                                )}
+                                <span>{a.name}</span>
+                              </span>
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      {totalFiles > 1 && (
+                        <Select
+                          value=""
+                          onValueChange={(v) => onApplyArtistToAll(v)}
+                        >
+                          <SelectTrigger className="text-xs">
+                            <SelectValue placeholder="Apply to all…" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {artists.map((a) => (
+                              <SelectItem key={a.id} value={a.id}>
+                                {a.name}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      )}
+                    </div>
+                  )}
+                </div>
+
                 <div className="grid gap-3 sm:grid-cols-[1fr_140px]">
                   <div className="space-y-1.5">
                     <Label className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">

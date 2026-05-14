@@ -1,3 +1,4 @@
+import { useState, useCallback } from "react";
 import {
   Upload,
   FileAudio,
@@ -15,13 +16,17 @@ import {
   Clock3,
   Gauge,
   Eraser,
+  Users,
 } from "lucide-react";
 import { useDropzone } from "react-dropzone";
 import { motion, AnimatePresence } from "framer-motion";
 import { formatBytes } from "@/lib/utils";
 import { useMetaClean, AudioFile, CustomMetadata } from "@/hooks/use-metaclean";
+import { useArtists } from "@/hooks/use-artists";
+import { deriveTitleFromFilename, type Artist } from "@/lib/artists";
 import { ThemeProvider, useTheme } from "@/components/theme-provider";
 import { MetadataEditor } from "@/components/metadata-editor";
+import { ArtistManager } from "@/components/artist-manager";
 import { FORMATS, type OutputFormat } from "@/lib/ffmpeg";
 
 import { Button } from "@/components/ui/button";
@@ -160,6 +165,7 @@ function StatusPill({ status }: { status: AudioFile["status"] }) {
 function FileRow({
   file,
   totalFiles,
+  artists,
   onRemove,
   onClean,
   onDownload,
@@ -170,9 +176,13 @@ function FileRow({
   onApplyToAll,
   onSetFormat,
   onSetBitrate,
+  onApplyArtist,
+  onApplyArtistToAll,
+  onOpenArtistManager,
 }: {
   file: AudioFile;
   totalFiles: number;
+  artists: Artist[];
   onRemove: (id: string) => void;
   onClean: (id: string) => void;
   onDownload: (id: string) => void;
@@ -183,6 +193,9 @@ function FileRow({
   onApplyToAll: (id: string) => void;
   onSetFormat: (id: string, fmt: OutputFormat) => void;
   onSetBitrate: (id: string, br: number | undefined) => void;
+  onApplyArtist: (id: string, artistId: string) => void;
+  onApplyArtistToAll: (artistId: string) => void;
+  onOpenArtistManager: () => void;
 }) {
   const isDone = file.status === "done";
   const isCleaning = file.status === "cleaning";
@@ -420,12 +433,16 @@ function FileRow({
         <MetadataEditor
           file={file}
           totalFiles={totalFiles}
+          artists={artists}
           onChange={onCustomChange}
           onCoverArt={onCoverArt}
           onClearCoverArt={onClearCoverArt}
           onApplyToAll={onApplyToAll}
           onSetFormat={onSetFormat}
           onSetBitrate={onSetBitrate}
+          onApplyArtist={onApplyArtist}
+          onApplyArtistToAll={onApplyArtistToAll}
+          onOpenArtistManager={onOpenArtistManager}
         />
       )}
     </motion.div>
@@ -448,12 +465,48 @@ function MainApp() {
     downloadAll,
     setCustomMetadata,
     setCoverArt,
+    setCoverArtFromDataUrl,
     clearCoverArt,
     applyToAll,
     setOutputFormat,
     setOutputBitrate,
     setOutputFormatAll,
   } = useMetaClean();
+
+  const { artists, addArtist, updateArtist, removeArtist, getArtist } = useArtists();
+  const [artistManagerOpen, setArtistManagerOpen] = useState(false);
+
+  const applyArtistToFile = useCallback(
+    (fileId: string, artistId: string) => {
+      const artist = getArtist(artistId);
+      const file = files.find((f) => f.id === fileId);
+      if (!artist || !file) return;
+      const title = deriveTitleFromFilename(file.file.name, artist.name);
+      const patch: Partial<CustomMetadata> = {
+        title,
+        artist: artist.name,
+        albumArtist: artist.albumArtist || artist.name,
+      };
+      if (artist.album) patch.album = artist.album;
+      if (artist.year) patch.year = artist.year;
+      if (artist.genre) patch.genre = artist.genre;
+      if (artist.comment) patch.comment = artist.comment;
+      setCustomMetadata(fileId, patch);
+      if (artist.coverDataUrl) {
+        setCoverArtFromDataUrl(fileId, artist.coverDataUrl, `${artist.name}.jpg`).catch(
+          (err) => console.error("Failed to apply artist cover", err)
+        );
+      }
+    },
+    [files, getArtist, setCustomMetadata, setCoverArtFromDataUrl]
+  );
+
+  const applyArtistToAll = useCallback(
+    (artistId: string) => {
+      files.forEach((f) => applyArtistToFile(f.id, artistId));
+    },
+    [files, applyArtistToFile]
+  );
 
   const canCleanAll = files.some(
     (f) => f.status === "ready" || f.status === "queued" || f.status === "error"
@@ -481,11 +534,25 @@ function MainApp() {
               </span>
             </div>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
             <span className="text-[11px] font-medium text-muted-foreground tracking-wider uppercase items-center gap-1.5 hidden md:inline-flex">
               <ShieldCheck className="w-3.5 h-3.5 text-primary" />
               Files never leave your browser
             </span>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setArtistManagerOpen(true)}
+              className="gap-1.5"
+            >
+              <Users className="w-4 h-4" />
+              <span className="hidden sm:inline">Artists</span>
+              {artists.length > 0 && (
+                <span className="ml-1 inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1 rounded-full bg-primary/15 text-primary text-[10px] font-semibold">
+                  {artists.length}
+                </span>
+              )}
+            </Button>
             <ThemeToggle />
           </div>
         </div>
@@ -686,6 +753,7 @@ function MainApp() {
                     key={file.id}
                     file={file}
                     totalFiles={files.length}
+                    artists={artists}
                     onRemove={removeFile}
                     onClean={cleanFile}
                     onDownload={downloadFile}
@@ -696,6 +764,9 @@ function MainApp() {
                     onApplyToAll={applyToAll}
                     onSetFormat={setOutputFormat}
                     onSetBitrate={setOutputBitrate}
+                    onApplyArtist={applyArtistToFile}
+                    onApplyArtistToAll={applyArtistToAll}
+                    onOpenArtistManager={() => setArtistManagerOpen(true)}
                   />
                 ))}
               </AnimatePresence>
@@ -703,6 +774,15 @@ function MainApp() {
           </div>
         )}
       </main>
+
+      <ArtistManager
+        open={artistManagerOpen}
+        onOpenChange={setArtistManagerOpen}
+        artists={artists}
+        addArtist={addArtist}
+        updateArtist={updateArtist}
+        removeArtist={removeArtist}
+      />
 
       <footer className="border-t mt-8">
         <div className="container mx-auto max-w-6xl px-4 py-4 text-xs text-muted-foreground flex items-center justify-between">
