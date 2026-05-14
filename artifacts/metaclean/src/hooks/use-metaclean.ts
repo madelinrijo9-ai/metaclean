@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { parseBlob, type IAudioMetadata } from "music-metadata";
 import { fetchFile } from "@ffmpeg/util";
 import JSZip from "jszip";
@@ -147,8 +147,25 @@ export function useMetaClean() {
     removeCoverArt: true,
     defaultOutputFormat: "same",
   });
-  const [isEngineLoading, setIsEngineLoading] = useState(false);
+  const [isEngineLoading, setIsEngineLoading] = useState(true);
+  const [isEngineReady, setIsEngineReady] = useState(false);
   const cleanLockRef = useRef<Promise<void>>(Promise.resolve());
+
+  // Preload ffmpeg.wasm immediately on mount so it's ready before the user clicks Clean
+  useEffect(() => {
+    let cancelled = false;
+    getFFmpeg()
+      .then(() => {
+        if (!cancelled) setIsEngineReady(true);
+      })
+      .catch((err) => console.error("Failed to preload FFmpeg", err))
+      .finally(() => {
+        if (!cancelled) setIsEngineLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const setOptions = useCallback(
     (updater: Options | ((prev: Options) => Options)) => {
@@ -223,12 +240,6 @@ export function useMetaClean() {
       }));
 
       setFiles((prev) => [...prev, ...audioFiles]);
-
-      // Start ffmpeg load in background — needed for cleaning, not for reading
-      setIsEngineLoading(true);
-      getFFmpeg()
-        .catch((err) => console.error("Failed to load FFmpeg", err))
-        .finally(() => setIsEngineLoading(false));
 
       // Read metadata in parallel — much faster than ffmpeg roundtrip
       await Promise.all(audioFiles.map((af) => readMetadata(af.id, af.file)));
@@ -521,6 +532,7 @@ export function useMetaClean() {
     options,
     setOptions,
     isEngineLoading,
+    isEngineReady,
     addFiles,
     removeFile,
     clearAll,

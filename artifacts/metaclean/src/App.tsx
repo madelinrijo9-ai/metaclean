@@ -438,6 +438,7 @@ function MainApp() {
     options,
     setOptions,
     isEngineLoading,
+    isEngineReady,
     addFiles,
     removeFile,
     clearAll,
@@ -503,7 +504,18 @@ function MainApp() {
                   className="flex items-center justify-center p-3 text-sm text-muted-foreground bg-accent/50 rounded-lg"
                 >
                   <RefreshCw className="w-4 h-4 mr-2 animate-spin text-primary" />
-                  Loading audio engine (one time, ~30 MB)…
+                  Loading audio engine (one time, ~30 MB)… You can add files while this finishes.
+                </motion.div>
+              )}
+              {!isEngineLoading && isEngineReady && files.length === 0 && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: "auto" }}
+                  exit={{ opacity: 0, height: 0 }}
+                  className="flex items-center justify-center p-2 text-xs text-emerald-600 dark:text-emerald-400"
+                >
+                  <CheckCircle2 className="w-3.5 h-3.5 mr-2" />
+                  Audio engine ready. Cleaning will start instantly.
                 </motion.div>
               )}
             </AnimatePresence>
@@ -596,12 +608,18 @@ function MainApp() {
                 >
                   {isAnyCleaning ? (
                     <>
-                      <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> Cleaning…
+                      <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                      {isEngineReady ? "Cleaning…" : "Loading engine…"}
                     </>
                   ) : (
                     `Clean ${files.filter((f) => f.status !== "done" && f.status !== "cleaning").length || ""} file${files.length === 1 ? "" : "s"}`.trim()
                   )}
                 </Button>
+                {isAnyCleaning && !isEngineReady && (
+                  <p className="text-[11px] text-muted-foreground text-center">
+                    First-time setup downloads ~30 MB. Subsequent cleans are instant.
+                  </p>
+                )}
 
                 <AnimatePresence>
                   {canDownloadAll && (
