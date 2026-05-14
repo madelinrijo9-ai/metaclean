@@ -441,7 +441,14 @@ export function useMetaClean() {
           await ffmpeg.writeFile(coverName, await fetchFile(fileToClean.coverArt.file));
         }
 
-        const args: string[] = ["-i", inputName];
+        // Be lenient with malformed input headers/chunks. Suno/Udio WAVs
+        // commonly embed unusual LIST/INFO chunks with metadata; without these
+        // flags ffmpeg's WAV demuxer can try to allocate buffers based on
+        // bogus chunk-size fields and crash with "memory access out of bounds".
+        const args: string[] = [];
+        args.push("-err_detect", "ignore_err");
+        args.push("-fflags", "+discardcorrupt");
+        args.push("-i", inputName);
         if (coverName) args.push("-i", coverName);
 
         // Strip all metadata first
@@ -572,14 +579,20 @@ export function useMetaClean() {
         if (rc !== 0) {
           // Always retry once for lossless same-container with explicit re-encode.
           // Suno/Udio WAVs often have non-standard chunks that break -c:a copy.
-          const canRetry = sameContainer && FORMATS[outFmt].lossless;
+          const canReencodeRetry = sameContainer && FORMATS[outFmt].lossless;
+          // 2-pass fallback for cross-format conversions from WAV: many
+          // Suno/Udio files crash the direct encode (likely malformed RIFF
+          // chunks). Re-muxing through clean s16le PCM in MEMFS first
+          // isolates the demuxer from the encoder, which reliably works
+          // even when the one-shot encode aborts.
+          const canTwoPass = inExt === "wav" && !sameContainer;
           console.error("ffmpeg first attempt failed", {
             rc,
             execErrorOnce,
             log: getCapturedLog(15),
             args,
           });
-          if (canRetry) {
+          if (canReencodeRetry) {
             phase = `retry exec (${inExt}→${outExt}, re-encode)`;
             const retry = args.filter((v, i, arr) => {
               if (v === "-c:a" && arr[i + 1] === "copy") return false;
@@ -594,6 +607,75 @@ export function useMetaClean() {
               const last = tail.split("\n").filter(Boolean).slice(-2).join(" | ");
               throw new Error(
                 `ffmpeg retry exited ${second.rc}${last ? ` — ${last}` : ""}`
+              );
+            }
+          } else if (canTwoPass) {
+            // Pass 1: input.wav → clean.wav (strip junk chunks, normalize PCM)
+            const cleanName = `clean_${id.slice(0, 8)}.wav`;
+            phase = `2-pass remux (${inExt}→clean wav)`;
+            const remuxArgs = [
+              "-err_detect", "ignore_err",
+              "-fflags", "+discardcorrupt+bitexact",
+              "-i", inputName,
+              "-map", "0:a:0",
+              "-map_metadata", "-1",
+              "-c:a", "pcm_s16le",
+              "-f", "wav",
+              "-y", cleanName,
+            ];
+            const remux = await runExecWithRecovery(remuxArgs);
+            if (remux.rc !== 0) {
+              const tail = getCapturedLog(20);
+              const last = tail.split("\n").filter(Boolean).slice(-2).join(" | ");
+              throw new Error(
+                `2-pass remux failed (rc ${remux.rc})${last ? ` — ${last}` : ""}`
+              );
+            }
+            // Pass 2: clean.wav → output.<fmt> using the original args, but
+            // with the input swapped to the clean intermediate. Drop the
+            // lenient input flags (they did their job in pass 1) and the
+            // original input cover-stream mapping (clean.wav has audio only).
+            phase = `2-pass encode (clean wav→${outExt})`;
+            const pass2: string[] = ["-i", cleanName];
+            if (coverName) pass2.push("-i", coverName);
+            pass2.push("-map_metadata", "-1");
+            pass2.push("-map", "0:a:0");
+            if (coverName) pass2.push("-map", "1:0");
+            // Re-apply tags
+            if (customs) {
+              if (customs.title) pass2.push("-metadata", `title=${customs.title}`);
+              if (customs.artist) pass2.push("-metadata", `artist=${customs.artist}`);
+              if (customs.album) pass2.push("-metadata", `album=${customs.album}`);
+              if (customs.albumArtist) pass2.push("-metadata", `album_artist=${customs.albumArtist}`);
+              if (customs.year) pass2.push("-metadata", `date=${customs.year}`);
+              if (customs.genre) pass2.push("-metadata", `genre=${customs.genre}`);
+              if (customs.track) pass2.push("-metadata", `track=${customs.track}`);
+              if (customs.comment) pass2.push("-metadata", `comment=${customs.comment}`);
+            } else if (options.keepBasicTags && fileToClean.metadata) {
+              if (fileToClean.metadata.title) pass2.push("-metadata", `title=${fileToClean.metadata.title}`);
+              if (fileToClean.metadata.artist) pass2.push("-metadata", `artist=${fileToClean.metadata.artist}`);
+              if (fileToClean.metadata.album) pass2.push("-metadata", `album=${fileToClean.metadata.album}`);
+            }
+            pass2.push(...codecArgsFor(outFmt, fileToClean.outputBitrate));
+            if (coverName) {
+              pass2.push(...coverCodecFor(outFmt));
+              pass2.push("-disposition:v", "attached_pic");
+              pass2.push("-metadata:s:v", "title=Album cover");
+              pass2.push("-metadata:s:v", "comment=Cover (front)");
+              if (outExt === "mp3") pass2.push("-id3v2_version", "3");
+            }
+            if (outExt === "m4a") pass2.push("-movflags", "+faststart");
+            pass2.push(...encoderSpoofArgs(options.encoderSpoof));
+            pass2.push("-y", outputName);
+            const second = await runExecWithRecovery(pass2);
+            try {
+              await ffmpeg.deleteFile(cleanName);
+            } catch {}
+            if (second.rc !== 0) {
+              const tail = getCapturedLog(20);
+              const last = tail.split("\n").filter(Boolean).slice(-2).join(" | ");
+              throw new Error(
+                `2-pass encode failed (rc ${second.rc})${last ? ` — ${last}` : ""}`
               );
             }
           } else {
