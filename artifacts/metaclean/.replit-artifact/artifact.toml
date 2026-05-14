@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "MetaClean - Strip AI Metadata"
+version = "1.0.0"
+id = "artifacts/metaclean"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 22374
+
+[services.development]
+run = "pnpm --filter @workspace/metaclean run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/metaclean", "run", "build" ]
+publicDir = "artifacts/metaclean/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "22374"
+BASE_PATH = "/"
