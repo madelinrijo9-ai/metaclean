@@ -110,6 +110,66 @@ export const resetFFmpeg = async (): Promise<void> => {
 
 export type OutputFormat = "same" | "mp3" | "flac" | "wav" | "m4a" | "ogg" | "opus";
 
+// Encoder-tag spoofing presets. ffmpeg writes its own `encoder` tag (e.g.
+// "Lavf60.16.100") unless we override it. These values mimic real DAW exports
+// so the cleaned file doesn't fingerprint as ffmpeg.
+//   id "default" → leave ffmpeg's tag in place (no override)
+//   id "blank"   → suppress the tag entirely (uses -bitexact)
+//   any other    → write the value into the encoder field
+export interface EncoderPreset {
+  id: string;
+  label: string;
+  value?: string; // undefined for "default" / "blank" sentinels
+  group?: "Default" | "DAW" | "Editor";
+}
+
+export const ENCODER_PRESETS: EncoderPreset[] = [
+  { id: "default", label: "ffmpeg default (no spoof)", group: "Default" },
+  { id: "blank", label: "Strip encoder tag entirely", group: "Default" },
+  { id: "fl-studio-21", label: "FL Studio 21", value: "FL Studio (21.2.3 [Build 4004])", group: "DAW" },
+  { id: "logic-pro-11", label: "Logic Pro 11", value: "Logic Pro 11.1.0", group: "DAW" },
+  { id: "ableton-live-12", label: "Ableton Live 12", value: "Ableton Live 12.1", group: "DAW" },
+  { id: "pro-tools-2024", label: "Pro Tools 2024", value: "Pro Tools 2024.6.0", group: "DAW" },
+  { id: "cubase-13", label: "Cubase 13", value: "Cubase 13.0.40", group: "DAW" },
+  { id: "studio-one-7", label: "Studio One 7", value: "Studio One 7.0.2", group: "DAW" },
+  { id: "reaper-7", label: "REAPER 7", value: "REAPER 7.18/x64", group: "DAW" },
+  { id: "garageband", label: "GarageBand 10", value: "GarageBand 10.4.11", group: "DAW" },
+  { id: "bitwig-5", label: "Bitwig Studio 5", value: "Bitwig Studio 5.2", group: "DAW" },
+  { id: "audacity", label: "Audacity 3.5", value: "Audacity 3.5.1", group: "Editor" },
+  { id: "adobe-audition", label: "Adobe Audition 2024", value: "Adobe Audition 24.6", group: "Editor" },
+];
+
+// Resolve a spoof id to ffmpeg args. Returns the args to APPEND to the command.
+// Always called after `-map_metadata -1` and any custom `-metadata` flags so it
+// overrides whatever else might be set.
+export const encoderSpoofArgs = (id: string): string[] => {
+  if (!id || id === "default") return [];
+  if (id === "blank") {
+    // bitexact tells ffmpeg's muxer not to stamp its own encoder string.
+    // We also explicitly clear the encoder metadata in case anything else
+    // along the chain (e.g. id3v2 muxer) tries to add one.
+    return [
+      "-fflags",
+      "+bitexact",
+      "-flags:a",
+      "+bitexact",
+      "-metadata",
+      "encoder=",
+    ];
+  }
+  const preset = ENCODER_PRESETS.find((p) => p.id === id);
+  const value = preset?.value ?? id; // allow raw custom string as fallback
+  // bitexact suppresses ffmpeg's auto-tag, then our explicit -metadata wins.
+  return [
+    "-fflags",
+    "+bitexact",
+    "-flags:a",
+    "+bitexact",
+    "-metadata",
+    `encoder=${value}`,
+  ];
+};
+
 export interface FormatInfo {
   ext: string;
   mime: string;

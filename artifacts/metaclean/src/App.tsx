@@ -17,6 +17,7 @@ import {
   Gauge,
   Eraser,
   Users,
+  Fingerprint,
 } from "lucide-react";
 import { useDropzone } from "react-dropzone";
 import { motion, AnimatePresence } from "framer-motion";
@@ -27,7 +28,7 @@ import { deriveTitleFromFilename, type Artist } from "@/lib/artists";
 import { ThemeProvider, useTheme } from "@/components/theme-provider";
 import { MetadataEditor } from "@/components/metadata-editor";
 import { ArtistManager } from "@/components/artist-manager";
-import { FORMATS, type OutputFormat } from "@/lib/ffmpeg";
+import { FORMATS, ENCODER_PRESETS, type OutputFormat } from "@/lib/ffmpeg";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -472,6 +473,7 @@ function MainApp() {
     setOutputBitrate,
     setOutputFormatAll,
     setOutputBitrateAll,
+    setEncoderSpoof,
   } = useMetaClean();
 
   const { artists, addArtist, updateArtist, removeArtist, getArtist } = useArtists();
@@ -726,6 +728,49 @@ function MainApp() {
                     </div>
                   );
                 })()}
+
+                {/* Encoder spoof — disguise the ffmpeg fingerprint */}
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-foreground/80 flex items-center gap-1.5">
+                    <Fingerprint className="w-3.5 h-3.5 text-primary" />
+                    Encoder signature
+                  </label>
+                  <Select
+                    value={options.encoderSpoof}
+                    onValueChange={setEncoderSpoof}
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {(["Default", "DAW", "Editor"] as const).map((g) => {
+                        const items = ENCODER_PRESETS.filter(
+                          (p) => p.group === g
+                        );
+                        if (items.length === 0) return null;
+                        return (
+                          <div key={g}>
+                            <div className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                              {g === "Default" ? "Default" : g === "DAW" ? "Make it look like a DAW" : "Audio editors"}
+                            </div>
+                            {items.map((p) => (
+                              <SelectItem key={p.id} value={p.id}>
+                                {p.label}
+                              </SelectItem>
+                            ))}
+                          </div>
+                        );
+                      })}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-[11px] text-muted-foreground">
+                    {options.encoderSpoof === "default"
+                      ? "Cleaned files will show ffmpeg as the encoder."
+                      : options.encoderSpoof === "blank"
+                      ? "Encoder field will be left empty."
+                      : "Cleaned files will look like a real DAW export."}
+                  </p>
+                </div>
 
                 <p className="text-[11px] text-muted-foreground italic">
                   You can still override any of these per file in its editor.

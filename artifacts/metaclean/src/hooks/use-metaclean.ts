@@ -10,6 +10,7 @@ import {
   FORMATS,
   codecArgsFor,
   coverCodecFor,
+  encoderSpoofArgs,
   type OutputFormat,
 } from "@/lib/ffmpeg";
 
@@ -68,6 +69,10 @@ export interface Options {
   keepBasicTags: boolean;
   removeCoverArt: boolean;
   defaultOutputFormat: OutputFormat;
+  // ID of the encoder spoof preset (see ENCODER_PRESETS). "default" leaves
+  // ffmpeg's auto-stamp ("Lavf…") in place; "blank" strips it; any other id
+  // writes that DAW's signature into the encoder tag.
+  encoderSpoof: string;
 }
 
 export const SUPPORTS_COVER_ART_INPUT = new Set(["mp3", "flac", "m4a"]);
@@ -156,6 +161,7 @@ export function useMetaClean() {
     keepBasicTags: false,
     removeCoverArt: true,
     defaultOutputFormat: "same",
+    encoderSpoof: "default",
   });
   const [isEngineLoading, setIsEngineLoading] = useState(true);
   const [isEngineReady, setIsEngineReady] = useState(false);
@@ -331,6 +337,10 @@ export function useMetaClean() {
     setFiles((prev) => prev.map((f) => ({ ...f, outputBitrate: br })));
   }, []);
 
+  const setEncoderSpoof = useCallback((id: string) => {
+    setOptionsState((p) => ({ ...p, encoderSpoof: id }));
+  }, []);
+
   const applyToAll = useCallback((sourceId: string) => {
     const src = filesRef.current.find((f) => f.id === sourceId);
     if (!src) return;
@@ -490,6 +500,10 @@ export function useMetaClean() {
         if (outExt === "m4a") {
           args.push("-movflags", "+faststart");
         }
+
+        // Encoder-tag spoof — appended last so its -metadata wins, and so
+        // -bitexact applies to the muxer that's about to write the file.
+        args.push(...encoderSpoofArgs(options.encoderSpoof));
 
         args.push("-y", outputName);
 
@@ -728,5 +742,6 @@ export function useMetaClean() {
     setOutputBitrate,
     setOutputFormatAll,
     setOutputBitrateAll,
+    setEncoderSpoof,
   };
 }
