@@ -4,6 +4,7 @@ import { fetchFile } from "@ffmpeg/util";
 import JSZip from "jszip";
 import {
   getFFmpeg,
+  resetFFmpeg,
   beginLogCapture,
   getCapturedLog,
   FORMATS,
@@ -11,6 +12,13 @@ import {
   coverCodecFor,
   type OutputFormat,
 } from "@/lib/ffmpeg";
+
+// Reset the ffmpeg.wasm engine after this much cumulative input has been
+// processed. The WASM heap doesn't shrink between encodes, so long queues of
+// large files (e.g. 11x 30 MB WAVs) eventually hit "memory access out of
+// bounds". 60 MB is a safe budget that keeps small files snappy and forces a
+// fresh instance before any single large file would push us past the limit.
+const FFMPEG_RESET_BYTES = 60 * 1024 * 1024;
 
 export type FileStatus = "queued" | "reading" | "ready" | "cleaning" | "done" | "error";
 
@@ -152,6 +160,7 @@ export function useMetaClean() {
   const [isEngineLoading, setIsEngineLoading] = useState(true);
   const [isEngineReady, setIsEngineReady] = useState(false);
   const cleanLockRef = useRef<Promise<void>>(Promise.resolve());
+  const bytesSinceResetRef = useRef<number>(0);
 
   // Preload ffmpeg.wasm immediately on mount so it's ready before the user clicks Clean
   useEffect(() => {
@@ -369,12 +378,28 @@ export function useMetaClean() {
         return String(e);
       };
 
+      // Proactively recycle the WASM engine before processing this file if
+      // the running heap is approaching the safe budget. Doing it BEFORE the
+      // encode (rather than after) means the next file always starts on a
+      // fresh, predictable heap instead of inheriting fragmented allocations.
+      if (bytesSinceResetRef.current + fileToClean.file.size > FFMPEG_RESET_BYTES) {
+        try {
+          await resetFFmpeg();
+        } catch (e) {
+          console.warn("resetFFmpeg failed (continuing with fresh load)", e);
+        }
+        bytesSinceResetRef.current = 0;
+      }
+
+      const loadEngine = () =>
+        getFFmpeg((progress) => {
+          updateFile(id, { progress: Math.min(100, Math.max(0, progress * 100)) });
+        });
+
       try {
         beginLogCapture();
         phase = "load engine";
-        const ffmpeg = await getFFmpeg((progress) => {
-          updateFile(id, { progress: Math.min(100, Math.max(0, progress * 100)) });
-        });
+        let ffmpeg = await loadEngine();
 
         const inExt = getExt(fileToClean.file.name);
         const inputName = `in_${id.slice(0, 8)}.${inExt || "bin"}`;
@@ -468,16 +493,67 @@ export function useMetaClean() {
 
         args.push("-y", outputName);
 
+        const isMemoryError = (e: any): boolean => {
+          const s = describeError(e).toLowerCase();
+          return (
+            s.includes("memory access out of bounds") ||
+            s.includes("out of memory") ||
+            s.includes("aborted") ||
+            s.includes("rangeerror")
+          );
+        };
+
+        // Run the encode, recovering once from a WASM heap fault by tearing
+        // down the engine, reloading, re-uploading the inputs, and retrying.
+        // This handles cases where prior encodes left the heap in a bad state
+        // even though our budget-based recycle didn't trip.
+        const runExecWithRecovery = async (
+          execArgs: string[]
+        ): Promise<{ rc: number; err: any }> => {
+          beginLogCapture();
+          let err: any = null;
+          let rc = 0;
+          try {
+            rc = await ffmpeg.exec(execArgs);
+          } catch (e) {
+            err = e;
+            rc = -1;
+          }
+          if (rc !== 0 && isMemoryError(err || getCapturedLog(20))) {
+            console.warn("[MetaClean] OOM detected, recycling engine and retrying", {
+              err,
+              tail: getCapturedLog(10),
+            });
+            try {
+              await resetFFmpeg();
+            } catch {}
+            bytesSinceResetRef.current = 0;
+            ffmpeg = await loadEngine();
+            // Re-upload inputs into the fresh MEMFS
+            await ffmpeg.writeFile(inputName, await fetchFile(fileToClean.file));
+            if (coverName && fileToClean.coverArt) {
+              await ffmpeg.writeFile(
+                coverName,
+                await fetchFile(fileToClean.coverArt.file)
+              );
+            }
+            beginLogCapture();
+            err = null;
+            rc = 0;
+            try {
+              rc = await ffmpeg.exec(execArgs);
+            } catch (e) {
+              err = e;
+              rc = -1;
+            }
+          }
+          return { rc, err };
+        };
+
         phase = `exec (${inExt}→${outExt}, ${sameContainer ? "copy" : "encode"})`;
-        beginLogCapture();
-        let execErrorOnce: any = null;
-        let rc = 0;
-        try {
-          rc = await ffmpeg.exec(args);
-        } catch (e) {
-          execErrorOnce = e;
-          rc = -1;
-        }
+        const first = await runExecWithRecovery(args);
+        let execErrorOnce: any = first.err;
+        let rc = first.rc;
 
         if (rc !== 0) {
           // Always retry once for lossless same-container with explicit re-encode.
@@ -498,19 +574,12 @@ export function useMetaClean() {
             });
             const yIdx = retry.indexOf("-y");
             retry.splice(yIdx, 0, ...codecArgsFor(outFmt, fileToClean.outputBitrate));
-            beginLogCapture();
-            let rc2 = 0;
-            try {
-              rc2 = await ffmpeg.exec(retry);
-            } catch (e2) {
-              console.error("ffmpeg retry threw", e2);
-              rc2 = -1;
-            }
-            if (rc2 !== 0) {
+            const second = await runExecWithRecovery(retry);
+            if (second.rc !== 0) {
               const tail = getCapturedLog(20);
               const last = tail.split("\n").filter(Boolean).slice(-2).join(" | ");
               throw new Error(
-                `ffmpeg retry exited ${rc2}${last ? ` — ${last}` : ""}`
+                `ffmpeg retry exited ${second.rc}${last ? ` — ${last}` : ""}`
               );
             }
           } else {
@@ -535,6 +604,8 @@ export function useMetaClean() {
           if (coverName) await ffmpeg.deleteFile(coverName);
         } catch {}
 
+        bytesSinceResetRef.current += fileToClean.file.size;
+
         updateFile(id, {
           status: "done",
           progress: 100,
@@ -555,6 +626,13 @@ export function useMetaClean() {
           status: "error",
           error: msg,
         });
+        // The engine may be in a corrupted state after a failure (especially
+        // a WASM heap fault). Tear it down so the next file starts on a
+        // fresh, predictable instance instead of cascading the same error.
+        try {
+          await resetFFmpeg();
+        } catch {}
+        bytesSinceResetRef.current = 0;
       } finally {
         resolveNext();
       }

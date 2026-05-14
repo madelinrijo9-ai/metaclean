@@ -89,6 +89,25 @@ export const getFFmpeg = async (
   return ffmpeg!;
 };
 
+// Tear down the singleton so the next getFFmpeg() builds a fresh instance with
+// a clean WASM heap. Required after large encodes — ffmpeg.wasm's MEMFS + libav
+// allocators don't shrink, so cumulative state across many large files
+// eventually causes "memory access out of bounds" mid-encode.
+export const resetFFmpeg = async (): Promise<void> => {
+  const inst = ffmpeg;
+  ffmpeg = null;
+  isLoaded = false;
+  loadPromise = null;
+  progressHandler = null;
+  if (inst) {
+    try {
+      inst.terminate();
+    } catch {
+      // ignore — instance may already be dead
+    }
+  }
+};
+
 export type OutputFormat = "same" | "mp3" | "flac" | "wav" | "m4a" | "ogg" | "opus";
 
 export interface FormatInfo {
