@@ -24,7 +24,9 @@ export const getFFmpeg = async (
 
   if (!loadPromise) {
     loadPromise = (async () => {
-      const baseURL = "https://unpkg.com/@ffmpeg/core@0.12.10/dist/umd";
+      // Serve ffmpeg-core from our own origin (vite public/) — much faster than unpkg
+      // and avoids the cross-origin slow-path entirely. Cached aggressively after first load.
+      const baseURL = `${import.meta.env.BASE_URL}ffmpeg`;
       await ffmpeg!.load({
         coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, "text/javascript"),
         wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, "application/wasm"),
