@@ -318,6 +318,10 @@ export function useMetaClean() {
     setOptionsState((p) => ({ ...p, defaultOutputFormat: fmt }));
   }, []);
 
+  const setOutputBitrateAll = useCallback((br: number | undefined) => {
+    setFiles((prev) => prev.map((f) => ({ ...f, outputBitrate: br })));
+  }, []);
+
   const applyToAll = useCallback((sourceId: string) => {
     const src = filesRef.current.find((f) => f.id === sourceId);
     if (!src) return;
@@ -645,5 +649,6 @@ export function useMetaClean() {
     setOutputFormat,
     setOutputBitrate,
     setOutputFormatAll,
+    setOutputBitrateAll,
   };
 }

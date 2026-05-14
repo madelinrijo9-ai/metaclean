@@ -471,6 +471,7 @@ function MainApp() {
     setOutputFormat,
     setOutputBitrate,
     setOutputFormatAll,
+    setOutputBitrateAll,
   } = useMetaClean();
 
   const { artists, addArtist, updateArtist, removeArtist, getArtist } = useArtists();
@@ -511,6 +512,13 @@ function MainApp() {
   const canCleanAll = files.some(
     (f) => f.status === "ready" || f.status === "queued" || f.status === "error"
   );
+  // Show the common bitrate across all files if they all match; otherwise fall
+  // back to the format default so the bulk select always has a sensible value.
+  const bulkBitrateValue = (() => {
+    if (files.length === 0) return undefined;
+    const first = files[0].outputBitrate;
+    return files.every((f) => f.outputBitrate === first) ? first : undefined;
+  })();
   const doneCount = files.filter((f) => f.status === "done").length;
   const canDownloadAll = doneCount > 1;
   const isAnyCleaning = files.some((f) => f.status === "cleaning");
@@ -593,28 +601,134 @@ function MainApp() {
               <CardTitle className="text-base font-semibold">Processing options</CardTitle>
             </CardHeader>
             <CardContent className="space-y-5">
-              <div className="space-y-2">
-                <label className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">
-                  Default output format
-                </label>
-                <Select
-                  value={options.defaultOutputFormat}
-                  onValueChange={(v) => setOutputFormatAll(v as OutputFormat)}
-                >
-                  <SelectTrigger className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="same">Same as input</SelectItem>
-                    {(Object.keys(FORMATS) as Array<keyof typeof FORMATS>).map((k) => (
-                      <SelectItem key={k} value={k}>
-                        {FORMATS[k].label} — {FORMATS[k].description}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <p className="text-[11px] text-muted-foreground">
-                  Applies to every file. You can override per-file in its editor.
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <label className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">
+                    Bulk apply
+                  </label>
+                  {files.length > 0 && (
+                    <span className="text-[10px] text-muted-foreground">
+                      {files.length} file{files.length === 1 ? "" : "s"}
+                    </span>
+                  )}
+                </div>
+
+                {/* Bulk artist */}
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-foreground/80 flex items-center gap-1.5">
+                    <Users className="w-3.5 h-3.5 text-primary" />
+                    Artist
+                  </label>
+                  {artists.length === 0 ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full justify-start text-muted-foreground font-normal"
+                      onClick={() => setArtistManagerOpen(true)}
+                    >
+                      <Sparkles className="w-3.5 h-3.5 mr-2 text-primary" />
+                      Add an artist preset…
+                    </Button>
+                  ) : (
+                    <div className="flex gap-1.5">
+                      <Select
+                        value=""
+                        onValueChange={(v) => {
+                          if (v === "__manage__") {
+                            setArtistManagerOpen(true);
+                            return;
+                          }
+                          if (files.length === 0) return;
+                          applyArtistToAll(v);
+                        }}
+                        disabled={files.length === 0}
+                      >
+                        <SelectTrigger className="w-full">
+                          <SelectValue
+                            placeholder={
+                              files.length === 0
+                                ? "Add files first…"
+                                : "Pick an artist to apply…"
+                            }
+                          />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {artists.map((a) => (
+                            <SelectItem key={a.id} value={a.id}>
+                              {a.name}
+                              {a.album ? ` — ${a.album}` : ""}
+                            </SelectItem>
+                          ))}
+                          <SelectItem value="__manage__">
+                            Manage artists…
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
+                  <p className="text-[11px] text-muted-foreground">
+                    Fills artist, album, year, genre & cover on every file.
+                  </p>
+                </div>
+
+                {/* Bulk format */}
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-foreground/80 flex items-center gap-1.5">
+                    <Music2 className="w-3.5 h-3.5 text-primary" />
+                    Output format
+                  </label>
+                  <Select
+                    value={options.defaultOutputFormat}
+                    onValueChange={(v) => setOutputFormatAll(v as OutputFormat)}
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="same">Same as input</SelectItem>
+                      {(Object.keys(FORMATS) as Array<keyof typeof FORMATS>).map((k) => (
+                        <SelectItem key={k} value={k}>
+                          {FORMATS[k].label} — {FORMATS[k].description}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                {/* Bulk bitrate (lossy formats only) */}
+                {(() => {
+                  const fmt = options.defaultOutputFormat;
+                  if (fmt === "same") return null;
+                  const info = FORMATS[fmt];
+                  if (!info.bitrates) return null;
+                  return (
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium text-foreground/80 flex items-center gap-1.5">
+                        <Gauge className="w-3.5 h-3.5 text-primary" />
+                        Bitrate
+                      </label>
+                      <Select
+                        value={String(bulkBitrateValue ?? info.defaultBitrate)}
+                        onValueChange={(v) => setOutputBitrateAll(Number(v))}
+                      >
+                        <SelectTrigger className="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {info.bitrates.map((br) => (
+                            <SelectItem key={br} value={String(br)}>
+                              {br} kbps
+                              {br === info.defaultBitrate && "  (recommended)"}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  );
+                })()}
+
+                <p className="text-[11px] text-muted-foreground italic">
+                  You can still override any of these per file in its editor.
                 </p>
               </div>
 
