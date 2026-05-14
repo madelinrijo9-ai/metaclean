@@ -1,75 +1,134 @@
 import { FFmpeg } from "@ffmpeg/ffmpeg";
-import { toBlobURL, fetchFile } from "@ffmpeg/util";
+import { toBlobURL } from "@ffmpeg/util";
 
 let ffmpeg: FFmpeg | null = null;
 let isLoaded = false;
 let loadPromise: Promise<void> | null = null;
+let progressHandler: ((p: number) => void) | null = null;
 
-export const getFFmpeg = async (onProgress?: (progress: number) => void): Promise<FFmpeg> => {
-  if (ffmpeg && isLoaded) {
-    return ffmpeg;
-  }
-
-  if (loadPromise) {
-    await loadPromise;
-    return ffmpeg!;
-  }
-
-  ffmpeg = new FFmpeg();
-  
-  if (onProgress) {
+export const getFFmpeg = async (
+  onProgress?: (progress: number) => void
+): Promise<FFmpeg> => {
+  if (!ffmpeg) {
+    ffmpeg = new FFmpeg();
     ffmpeg.on("progress", ({ progress }) => {
-      onProgress(progress);
+      if (progressHandler) progressHandler(progress);
     });
   }
 
-  loadPromise = (async () => {
-    const baseURL = "https://unpkg.com/@ffmpeg/core@0.12.10/dist/umd";
-    await ffmpeg!.load({
-      coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, "text/javascript"),
-      wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, "application/wasm"),
-    });
-    isLoaded = true;
-  })();
+  if (onProgress !== undefined) {
+    progressHandler = onProgress;
+  }
+
+  if (isLoaded) return ffmpeg;
+
+  if (!loadPromise) {
+    loadPromise = (async () => {
+      const baseURL = "https://unpkg.com/@ffmpeg/core@0.12.10/dist/umd";
+      await ffmpeg!.load({
+        coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, "text/javascript"),
+        wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, "application/wasm"),
+      });
+      isLoaded = true;
+    })();
+  }
 
   await loadPromise;
   return ffmpeg!;
 };
 
-export const parseFFmetadata = (content: string): Record<string, string> => {
-  const lines = content.split('\n');
-  const metadata: Record<string, string> = {};
-  
-  let currentKey = '';
-  let currentValue = '';
+export type OutputFormat = "same" | "mp3" | "flac" | "wav" | "m4a" | "ogg" | "opus";
 
-  for (const line of lines) {
-    // Skip empty lines and comments (except in multiline values)
-    if (!line.trim() || line.startsWith(';')) {
-        continue;
-    }
-    
-    // Check if line matches "key=value" pattern
-    const match = line.match(/^([^=]+)=(.*)$/);
-    
-    if (match) {
-        // Save previous key-value pair if exists
-        if (currentKey) {
-            metadata[currentKey] = currentValue.trim();
-        }
-        
-        currentKey = match[1].toLowerCase();
-        currentValue = match[2];
-    } else if (currentKey) {
-        // Handle multiline values (very rare in audio tags but possible)
-        currentValue += '\n' + line;
-    }
+export interface FormatInfo {
+  ext: string;
+  mime: string;
+  label: string;
+  description: string;
+  lossless: boolean;
+  supportsCoverArt: boolean;
+  defaultBitrate?: number; // kbps for lossy
+  bitrates?: number[];
+}
+
+export const FORMATS: Record<Exclude<OutputFormat, "same">, FormatInfo> = {
+  mp3: {
+    ext: "mp3",
+    mime: "audio/mpeg",
+    label: "MP3",
+    description: "Universal compatibility",
+    lossless: false,
+    supportsCoverArt: true,
+    defaultBitrate: 320,
+    bitrates: [128, 192, 256, 320],
+  },
+  flac: {
+    ext: "flac",
+    mime: "audio/flac",
+    label: "FLAC",
+    description: "Lossless, smaller than WAV",
+    lossless: true,
+    supportsCoverArt: true,
+  },
+  wav: {
+    ext: "wav",
+    mime: "audio/wav",
+    label: "WAV",
+    description: "Uncompressed PCM",
+    lossless: true,
+    supportsCoverArt: false,
+  },
+  m4a: {
+    ext: "m4a",
+    mime: "audio/mp4",
+    label: "M4A (AAC)",
+    description: "Apple/Android friendly",
+    lossless: false,
+    supportsCoverArt: true,
+    defaultBitrate: 256,
+    bitrates: [128, 192, 256, 320],
+  },
+  ogg: {
+    ext: "ogg",
+    mime: "audio/ogg",
+    label: "OGG Vorbis",
+    description: "Open, efficient",
+    lossless: false,
+    supportsCoverArt: false,
+    defaultBitrate: 224,
+    bitrates: [128, 192, 224, 320],
+  },
+  opus: {
+    ext: "opus",
+    mime: "audio/opus",
+    label: "Opus",
+    description: "Best modern lossy codec",
+    lossless: false,
+    supportsCoverArt: false,
+    defaultBitrate: 192,
+    bitrates: [96, 128, 192, 256],
+  },
+};
+
+export const codecArgsFor = (fmt: Exclude<OutputFormat, "same">, bitrate?: number): string[] => {
+  const br = bitrate ?? FORMATS[fmt].defaultBitrate;
+  switch (fmt) {
+    case "mp3":
+      return ["-c:a", "libmp3lame", "-b:a", `${br}k`];
+    case "flac":
+      return ["-c:a", "flac"];
+    case "wav":
+      return ["-c:a", "pcm_s16le"];
+    case "m4a":
+      return ["-c:a", "aac", "-b:a", `${br}k`];
+    case "ogg":
+      return ["-c:a", "libvorbis", "-b:a", `${br}k`];
+    case "opus":
+      return ["-c:a", "libopus", "-b:a", `${br}k`];
   }
+};
 
-  // Save the last key-value pair
-  if (currentKey) {
-      metadata[currentKey] = currentValue.trim();
-  }
-
-  return metadata;
+// Cover art codec by container — re-encode to mjpeg for max compatibility
+export const coverCodecFor = (fmt: Exclude<OutputFormat, "same">): string[] => {
+  if (fmt === "flac") return ["-c:v", "copy"]; // FLAC handles png/jpg natively as METADATA_BLOCK_PICTURE
+  return ["-c:v", "mjpeg"]; // mp3, m4a — mjpeg is the safest universally-readable choice
 };
