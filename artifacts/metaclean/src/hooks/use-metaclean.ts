@@ -352,7 +352,22 @@ export function useMetaClean() {
 
       updateFile(id, { status: "cleaning", progress: 0, cleanedBlob: undefined, error: undefined });
 
+      let phase = "init";
+      const describeError = (e: any): string => {
+        if (!e) return "unknown error";
+        if (typeof e === "string") return e;
+        if (e instanceof Error && e.message) return e.message;
+        if (e?.message) return String(e.message);
+        try {
+          const s = JSON.stringify(e);
+          if (s && s !== "{}") return s;
+        } catch {}
+        return String(e);
+      };
+
       try {
+        beginLogCapture();
+        phase = "load engine";
         const ffmpeg = await getFFmpeg((progress) => {
           updateFile(id, { progress: Math.min(100, Math.max(0, progress * 100)) });
         });
@@ -369,6 +384,7 @@ export function useMetaClean() {
         const outputName = `out_${id.slice(0, 8)}.${outExt}`;
         const sameContainer = inExt === outExt;
 
+        phase = `write input (${inExt || "?"}, ${fileToClean.file.size}b)`;
         await ffmpeg.writeFile(inputName, await fetchFile(fileToClean.file));
 
         const customs = hasAnyCustom(fileToClean.customMetadata)
@@ -380,6 +396,7 @@ export function useMetaClean() {
 
         let coverName: string | null = null;
         if (wantsCustomCover && fileToClean.coverArt) {
+          phase = "write cover";
           const cExt = getExt(fileToClean.coverArt.file.name) || "jpg";
           coverName = `cov_${id.slice(0, 8)}.${cExt}`;
           await ffmpeg.writeFile(coverName, await fetchFile(fileToClean.coverArt.file));
@@ -447,45 +464,60 @@ export function useMetaClean() {
 
         args.push("-y", outputName);
 
+        phase = `exec (${inExt}→${outExt}, ${sameContainer ? "copy" : "encode"})`;
         beginLogCapture();
+        let execErrorOnce: any = null;
+        let rc = 0;
         try {
-          const rc = await ffmpeg.exec(args);
-          if (rc !== 0) {
-            throw new Error(`ffmpeg exited with code ${rc}`);
-          }
-        } catch (execErr: any) {
-          // Fallback: WAV (and other lossless containers) sometimes fail with
-          // `-c:a copy` when the source has non-standard chunks (BWF/bext, etc.
-          // common in Suno/Udio output). Retry by re-encoding the audio.
-          if (sameContainer && FORMATS[outFmt].lossless) {
-            console.warn("Copy-mux failed, retrying with re-encode:", execErr);
-            const retry = args.filter((_, i, arr) => {
-              // remove the "-c:a copy" pair
-              if (arr[i] === "-c:a" && arr[i + 1] === "copy") return false;
-              if (i > 0 && arr[i - 1] === "-c:a" && arr[i] === "copy") return false;
+          rc = await ffmpeg.exec(args);
+        } catch (e) {
+          execErrorOnce = e;
+          rc = -1;
+        }
+
+        if (rc !== 0) {
+          // Always retry once for lossless same-container with explicit re-encode.
+          // Suno/Udio WAVs often have non-standard chunks that break -c:a copy.
+          const canRetry = sameContainer && FORMATS[outFmt].lossless;
+          console.error("ffmpeg first attempt failed", {
+            rc,
+            execErrorOnce,
+            log: getCapturedLog(15),
+            args,
+          });
+          if (canRetry) {
+            phase = `retry exec (${inExt}→${outExt}, re-encode)`;
+            const retry = args.filter((v, i, arr) => {
+              if (v === "-c:a" && arr[i + 1] === "copy") return false;
+              if (i > 0 && arr[i - 1] === "-c:a" && v === "copy") return false;
               return true;
             });
-            // insert proper codec args before -y
             const yIdx = retry.indexOf("-y");
-            const codecArgs = codecArgsFor(outFmt, fileToClean.outputBitrate);
-            retry.splice(yIdx, 0, ...codecArgs);
+            retry.splice(yIdx, 0, ...codecArgsFor(outFmt, fileToClean.outputBitrate));
             beginLogCapture();
-            const rc2 = await ffmpeg.exec(retry);
+            let rc2 = 0;
+            try {
+              rc2 = await ffmpeg.exec(retry);
+            } catch (e2) {
+              console.error("ffmpeg retry threw", e2);
+              rc2 = -1;
+            }
             if (rc2 !== 0) {
-              const tail = getCapturedLog(10);
+              const tail = getCapturedLog(20);
+              const last = tail.split("\n").filter(Boolean).slice(-2).join(" | ");
               throw new Error(
-                `ffmpeg failed (code ${rc2})${tail ? `: ${tail.split("\n").slice(-3).join(" ")}` : ""}`
+                `ffmpeg retry exited ${rc2}${last ? ` — ${last}` : ""}`
               );
             }
           } else {
-            const tail = getCapturedLog(10);
-            const baseMsg = execErr?.message || "ffmpeg exec failed";
-            throw new Error(
-              `${baseMsg}${tail ? ` — ${tail.split("\n").slice(-3).join(" ")}` : ""}`
-            );
+            const tail = getCapturedLog(20);
+            const last = tail.split("\n").filter(Boolean).slice(-2).join(" | ");
+            const base = execErrorOnce ? describeError(execErrorOnce) : `ffmpeg exited ${rc}`;
+            throw new Error(`${base}${last ? ` — ${last}` : ""}`);
           }
         }
 
+        phase = "read output";
         const outData = (await ffmpeg.readFile(outputName)) as Uint8Array;
         const buf = outData.buffer.slice(
           outData.byteOffset,
@@ -506,10 +538,18 @@ export function useMetaClean() {
           cleanedExt: outExt,
         });
       } catch (err: any) {
-        console.error(err);
+        const tail = getCapturedLog(20);
+        console.error("[MetaClean] Clean failed", {
+          phase,
+          err,
+          stringified: describeError(err),
+          ffmpegLog: tail,
+        });
+        const detail = describeError(err);
+        const msg = `[${phase}] ${detail}`;
         updateFile(id, {
           status: "error",
-          error: err?.message || "Failed to clean file",
+          error: msg,
         });
       } finally {
         resolveNext();
