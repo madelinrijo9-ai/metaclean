@@ -165,14 +165,15 @@ export async function parseWavToPcm(file: File | Blob): Promise<WavInfo> {
 
 /**
  * Map a WAV (formatTag, bitDepth) to the ffmpeg `-f` flag for headerless
- * raw PCM input. Returns null if unsupported.
+ * raw PCM input. Returns null if unsupported. (Kept for diagnostics; the
+ * primary path is now wrapPcmAsWav, which feeds ffmpeg a clean RIFF file
+ * instead of using the raw-PCM demuxer.)
  */
 export function pcmFormatFlag(
   formatTag: number,
   bitDepth: number
 ): string | null {
   if (formatTag === 1) {
-    // PCM signed (16/24/32) or unsigned 8-bit
     if (bitDepth === 8) return "u8";
     if (bitDepth === 16) return "s16le";
     if (bitDepth === 24) return "s24le";
@@ -180,10 +181,67 @@ export function pcmFormatFlag(
     return null;
   }
   if (formatTag === 3) {
-    // IEEE float
     if (bitDepth === 32) return "f32le";
     if (bitDepth === 64) return "f64le";
     return null;
   }
   return null;
+}
+
+/**
+ * Wrap raw PCM samples in a freshly-built minimal RIFF/WAVE container —
+ * just `RIFF`, `fmt `, and `data` chunks, no LIST/INFO/junk. Lets us hand
+ * ffmpeg's well-tested WAV demuxer a known-clean file regardless of how
+ * mangled the input was. Returns a Uint8Array that owns its own ArrayBuffer
+ * (safe to transfer to the worker without disturbing the source PCM bytes).
+ */
+export function wrapPcmAsWav(info: WavInfo): Uint8Array {
+  const { sampleRate, channels, bitDepth, formatTag, pcmBytes } = info;
+
+  if (channels < 1 || channels > 8) {
+    throw new Error(`Unsupported channel count: ${channels}`);
+  }
+  if (![8, 16, 24, 32, 64].includes(bitDepth)) {
+    throw new Error(`Unsupported bit depth: ${bitDepth}`);
+  }
+  // Normalize formatTag: WAVE_FORMAT_PCM (1) for ints, WAVE_FORMAT_FLOAT (3) for floats.
+  const wfTag = formatTag === 3 ? 3 : 1;
+
+  const blockAlign = (channels * bitDepth) / 8;
+  const byteRate = sampleRate * blockAlign;
+  const fmtChunkSize = 16;
+  const dataChunkSize = pcmBytes.byteLength;
+  // RIFF chunk size = 4 ("WAVE") + (8 + fmtChunkSize) + (8 + dataChunkSize)
+  const riffChunkSize = 4 + (8 + fmtChunkSize) + (8 + dataChunkSize);
+
+  const out = new Uint8Array(8 + riffChunkSize);
+  const view = new DataView(out.buffer);
+  let p = 0;
+
+  const writeAscii = (s: string) => {
+    for (let i = 0; i < s.length; i++) out[p + i] = s.charCodeAt(i);
+    p += s.length;
+  };
+
+  // RIFF header
+  writeAscii("RIFF");
+  view.setUint32(p, riffChunkSize, true); p += 4;
+  writeAscii("WAVE");
+
+  // fmt chunk
+  writeAscii("fmt ");
+  view.setUint32(p, fmtChunkSize, true); p += 4;
+  view.setUint16(p, wfTag, true); p += 2;
+  view.setUint16(p, channels, true); p += 2;
+  view.setUint32(p, sampleRate, true); p += 4;
+  view.setUint32(p, byteRate, true); p += 4;
+  view.setUint16(p, blockAlign, true); p += 2;
+  view.setUint16(p, bitDepth, true); p += 2;
+
+  // data chunk
+  writeAscii("data");
+  view.setUint32(p, dataChunkSize, true); p += 4;
+  out.set(pcmBytes, p);
+
+  return out;
 }

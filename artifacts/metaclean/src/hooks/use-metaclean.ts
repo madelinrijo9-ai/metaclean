@@ -13,7 +13,7 @@ import {
   encoderSpoofArgs,
   type OutputFormat,
 } from "@/lib/ffmpeg";
-import { parseWavToPcm, pcmFormatFlag, type WavInfo } from "@/lib/wav";
+import { parseWavToPcm, wrapPcmAsWav, type WavInfo } from "@/lib/wav";
 
 // Reset the ffmpeg.wasm engine after this much cumulative input has been
 // processed. The WASM heap doesn't shrink between encodes, so long queues of
@@ -423,47 +423,40 @@ export function useMetaClean() {
         const outputName = `out_${id.slice(0, 8)}.${outExt}`;
         const sameContainer = inExt === outExt;
 
-        // For WAV inputs we parse the RIFF header in JS and feed only the
-        // raw PCM payload to ffmpeg via `-f <pcm-format> -ar N -ac N`. This
-        // bypasses ffmpeg's WAV demuxer entirely, which is the only reliable
-        // way to handle Suno/Udio WAVs — those files embed malformed LIST/INFO
-        // chunks that crash libavformat with "memory access out of bounds"
-        // regardless of `-err_detect` / `-fflags +discardcorrupt`.
+        // For WAV inputs we parse the RIFF in JS to extract just the PCM
+        // payload, then re-wrap it in a freshly-built minimal RIFF/WAVE
+        // container (RIFF + fmt + data, nothing else). ffmpeg sees a
+        // pristine WAV file via its well-tested WAV demuxer — no LIST/INFO
+        // chunks, no junk, no chance of the libavformat allocator tripping
+        // on Suno/Udio's malformed metadata blocks. The wrapped buffer is
+        // freshly allocated each time, so the worker's transferable transfer
+        // doesn't disturb our master copy.
         // Same-format WAV→WAV stays on the regular path (no decode needed).
-        let useRawPcm = false;
+        let useCleanWav = false;
         let rawWav: WavInfo | null = null;
-        let rawPcmFmt: string | null = null;
         if (inExt === "wav" && !sameContainer) {
           phase = "parse wav header";
           try {
             rawWav = await parseWavToPcm(fileToClean.file);
-            rawPcmFmt = pcmFormatFlag(rawWav.formatTag, rawWav.bitDepth);
-            if (rawPcmFmt) {
-              useRawPcm = true;
-            } else {
-              console.warn(
-                "[MetaClean] WAV format unsupported for raw-PCM path; falling back to demuxer",
-                { formatTag: rawWav.formatTag, bitDepth: rawWav.bitDepth }
-              );
-            }
+            useCleanWav = true;
           } catch (e) {
             console.warn(
-              "[MetaClean] Could not parse WAV header in JS; falling back to demuxer",
+              "[MetaClean] Could not parse WAV header in JS; falling back to ffmpeg's demuxer",
               e
             );
           }
         }
 
-        const inputName = useRawPcm
-          ? `raw_${id.slice(0, 8)}.pcm`
+        const inputName = useCleanWav
+          ? `clean_${id.slice(0, 8)}.wav`
           : `in_${id.slice(0, 8)}.${inExt || "bin"}`;
 
-        phase = `write input (${useRawPcm ? "raw pcm" : inExt || "?"}, ${
-          useRawPcm ? rawWav!.pcmBytes.byteLength : fileToClean.file.size
-        }b)`;
-        if (useRawPcm) {
-          await ffmpeg.writeFile(inputName, rawWav!.pcmBytes);
+        if (useCleanWav) {
+          const cleanWav = wrapPcmAsWav(rawWav!);
+          phase = `write input (clean wav, ${cleanWav.byteLength}b)`;
+          await ffmpeg.writeFile(inputName, cleanWav);
         } else {
+          phase = `write input (${inExt || "?"}, ${fileToClean.file.size}b)`;
           await ffmpeg.writeFile(inputName, await fetchFile(fileToClean.file));
         }
 
@@ -483,17 +476,11 @@ export function useMetaClean() {
         }
 
         const args: string[] = [];
-        if (useRawPcm) {
-          // Headerless raw PCM input — no demuxer, no chance of OOB on chunks.
-          args.push("-f", rawPcmFmt!);
-          args.push("-ar", String(rawWav!.sampleRate));
-          args.push("-ac", String(rawWav!.channels));
-        } else {
-          // Be lenient with malformed input headers/chunks (e.g. odd MP3
-          // frames, broken FLAC seektables). Cheap insurance.
-          args.push("-err_detect", "ignore_err");
-          args.push("-fflags", "+discardcorrupt");
-        }
+        // Be lenient with malformed input headers/chunks (e.g. odd MP3
+        // frames, broken FLAC seektables). Cheap insurance for the regular
+        // demuxer path; harmless for our freshly-wrapped clean WAVs.
+        args.push("-err_detect", "ignore_err");
+        args.push("-fflags", "+discardcorrupt");
         args.push("-i", inputName);
         if (coverName) args.push("-i", coverName);
 
@@ -501,10 +488,10 @@ export function useMetaClean() {
         args.push("-map_metadata", "-1");
 
         // Stream mapping — always explicit so behavior is deterministic.
-        // Raw PCM has no embedded cover stream, so preserve-original is
-        // never applicable on that path.
+        // Our wrapped clean WAV has no cover stream, so preserve-original
+        // is never applicable on that path.
         const preserveOriginalCover =
-          !useRawPcm &&
+          !useCleanWav &&
           !coverName &&
           !options.removeCoverArt &&
           FORMATS[outFmt].supportsCoverArt &&
@@ -599,10 +586,11 @@ export function useMetaClean() {
             } catch {}
             bytesSinceResetRef.current = 0;
             ffmpeg = await loadEngine();
-            // Re-upload inputs into the fresh MEMFS. Use the same raw-PCM
-            // bytes for WAV inputs so the recovered run skips the demuxer too.
-            if (useRawPcm && rawWav) {
-              await ffmpeg.writeFile(inputName, rawWav.pcmBytes);
+            // Re-upload inputs into the fresh MEMFS. For WAV inputs, rebuild
+            // a fresh clean-WAV from our parsed PCM (the previous wrapper's
+            // buffer was transferred to the worker and is now detached).
+            if (useCleanWav && rawWav) {
+              await ffmpeg.writeFile(inputName, wrapPcmAsWav(rawWav));
             } else {
               await ffmpeg.writeFile(inputName, await fetchFile(fileToClean.file));
             }
@@ -625,7 +613,7 @@ export function useMetaClean() {
           return { rc, err };
         };
 
-        phase = `exec (${useRawPcm ? "raw pcm" : inExt}→${outExt}, ${
+        phase = `exec (${useCleanWav ? "clean wav" : inExt}→${outExt}, ${
           sameContainer ? "copy" : "encode"
         })`;
         const first = await runExecWithRecovery(args);
