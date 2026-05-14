@@ -4,6 +4,8 @@ import { fetchFile } from "@ffmpeg/util";
 import JSZip from "jszip";
 import {
   getFFmpeg,
+  beginLogCapture,
+  getCapturedLog,
   FORMATS,
   codecArgsFor,
   coverCodecFor,
@@ -445,7 +447,44 @@ export function useMetaClean() {
 
         args.push("-y", outputName);
 
-        await ffmpeg.exec(args);
+        beginLogCapture();
+        try {
+          const rc = await ffmpeg.exec(args);
+          if (rc !== 0) {
+            throw new Error(`ffmpeg exited with code ${rc}`);
+          }
+        } catch (execErr: any) {
+          // Fallback: WAV (and other lossless containers) sometimes fail with
+          // `-c:a copy` when the source has non-standard chunks (BWF/bext, etc.
+          // common in Suno/Udio output). Retry by re-encoding the audio.
+          if (sameContainer && FORMATS[outFmt].lossless) {
+            console.warn("Copy-mux failed, retrying with re-encode:", execErr);
+            const retry = args.filter((_, i, arr) => {
+              // remove the "-c:a copy" pair
+              if (arr[i] === "-c:a" && arr[i + 1] === "copy") return false;
+              if (i > 0 && arr[i - 1] === "-c:a" && arr[i] === "copy") return false;
+              return true;
+            });
+            // insert proper codec args before -y
+            const yIdx = retry.indexOf("-y");
+            const codecArgs = codecArgsFor(outFmt, fileToClean.outputBitrate);
+            retry.splice(yIdx, 0, ...codecArgs);
+            beginLogCapture();
+            const rc2 = await ffmpeg.exec(retry);
+            if (rc2 !== 0) {
+              const tail = getCapturedLog(10);
+              throw new Error(
+                `ffmpeg failed (code ${rc2})${tail ? `: ${tail.split("\n").slice(-3).join(" ")}` : ""}`
+              );
+            }
+          } else {
+            const tail = getCapturedLog(10);
+            const baseMsg = execErr?.message || "ffmpeg exec failed";
+            throw new Error(
+              `${baseMsg}${tail ? ` — ${tail.split("\n").slice(-3).join(" ")}` : ""}`
+            );
+          }
+        }
 
         const outData = (await ffmpeg.readFile(outputName)) as Uint8Array;
         const buf = outData.buffer.slice(

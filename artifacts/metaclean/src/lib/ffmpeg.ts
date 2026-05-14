@@ -5,6 +5,15 @@ let ffmpeg: FFmpeg | null = null;
 let isLoaded = false;
 let loadPromise: Promise<void> | null = null;
 let progressHandler: ((p: number) => void) | null = null;
+let logBuffer: string[] = [];
+
+export const beginLogCapture = () => {
+  logBuffer = [];
+};
+
+export const getCapturedLog = (lastN = 8): string => {
+  return logBuffer.slice(-lastN).join("\n");
+};
 
 export const getFFmpeg = async (
   onProgress?: (progress: number) => void
@@ -13,6 +22,10 @@ export const getFFmpeg = async (
     ffmpeg = new FFmpeg();
     ffmpeg.on("progress", ({ progress }) => {
       if (progressHandler) progressHandler(progress);
+    });
+    ffmpeg.on("log", ({ message }) => {
+      logBuffer.push(message);
+      if (logBuffer.length > 200) logBuffer.splice(0, logBuffer.length - 200);
     });
   }
 
