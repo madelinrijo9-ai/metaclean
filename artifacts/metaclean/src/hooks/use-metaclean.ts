@@ -11,9 +11,12 @@ import {
   codecArgsFor,
   coverCodecFor,
   encoderSpoofArgs,
+  ENCODER_PRESETS,
   type OutputFormat,
 } from "@/lib/ffmpeg";
 import { parseWavToPcm, wrapPcmAsWav, type WavInfo } from "@/lib/wav";
+import { encodeWavToMp3 } from "@/lib/lame-mp3";
+import { buildId3v2, dataUrlToCover, type Id3Tags, type Id3Cover } from "@/lib/id3";
 
 // Reset the ffmpeg.wasm engine after this much cumulative input has been
 // processed. The WASM heap doesn't shrink between encodes, so long queues of
@@ -409,8 +412,6 @@ export function useMetaClean() {
 
       try {
         beginLogCapture();
-        phase = "load engine";
-        let ffmpeg = await loadEngine();
 
         const inExt = getExt(fileToClean.file.name);
 
@@ -422,6 +423,100 @@ export function useMetaClean() {
         const outExt = FORMATS[outFmt].ext;
         const outputName = `out_${id.slice(0, 8)}.${outExt}`;
         const sameContainer = inExt === outExt;
+
+        // ────────────────────────────────────────────────────────────────
+        // Pure-JS path: WAV → MP3 via lamejs.
+        //
+        // libmp3lame inside @ffmpeg/core 0.12.10 reliably traps with
+        // "table index is out of bounds" / "memory access out of bounds"
+        // partway through encoding Suno/Udio WAVs, no matter how clean the
+        // input is (we proved this by feeding it a freshly-built minimal
+        // RIFF wrapper and still getting the same crash). lamejs is a
+        // battle-tested pure-JS LAME port that runs on the main thread —
+        // no wasm, no shared engine state, no recovery dance — so we use
+        // it for the most common Suno workflow (WAV → MP3) and skip ffmpeg
+        // entirely. Other format combinations stay on the ffmpeg path.
+        // ────────────────────────────────────────────────────────────────
+        if (inExt === "wav" && outFmt === "mp3") {
+          phase = "parse wav header";
+          const wavInfo = await parseWavToPcm(fileToClean.file);
+          const bitrate =
+            fileToClean.outputBitrate ?? FORMATS.mp3.defaultBitrate ?? 320;
+
+          phase = `js mp3 encode (${bitrate}k, ${wavInfo.channels}ch @${wavInfo.sampleRate}Hz)`;
+          updateFile(id, { progress: 5 });
+          const mp3Bytes = encodeWavToMp3(wavInfo, bitrate, (frac) => {
+            updateFile(id, { progress: 5 + Math.floor(frac * 90) });
+          });
+
+          phase = "build id3";
+          const customs = hasAnyCustom(fileToClean.customMetadata)
+            ? fileToClean.customMetadata!
+            : undefined;
+          const tags: Id3Tags = {};
+          if (customs) {
+            if (customs.title) tags.title = customs.title;
+            if (customs.artist) tags.artist = customs.artist;
+            if (customs.album) tags.album = customs.album;
+            if (customs.albumArtist) tags.albumArtist = customs.albumArtist;
+            if (customs.year) tags.year = customs.year;
+            if (customs.genre) tags.genre = customs.genre;
+            if (customs.track) tags.track = customs.track;
+            if (customs.comment) tags.comment = customs.comment;
+          } else if (options.keepBasicTags && fileToClean.metadata) {
+            if (fileToClean.metadata.title) tags.title = fileToClean.metadata.title;
+            if (fileToClean.metadata.artist) tags.artist = fileToClean.metadata.artist;
+            if (fileToClean.metadata.album) tags.album = fileToClean.metadata.album;
+          }
+          // Encoder-spoof tag (TSSE). "default" leaves it unset (no TSSE
+          // frame at all, which is cleaner than ffmpeg's auto-stamp).
+          // "blank" also leaves it unset. Otherwise we write the preset
+          // value verbatim.
+          if (options.encoderSpoof && options.encoderSpoof !== "default" && options.encoderSpoof !== "blank") {
+            const preset = ENCODER_PRESETS.find((p) => p.id === options.encoderSpoof);
+            const value = preset?.value;
+            if (value) tags.encoder = value;
+          }
+
+          let cover: Id3Cover | undefined;
+          if (fileToClean.coverArt && FORMATS.mp3.supportsCoverArt) {
+            const cBytes = new Uint8Array(
+              await fileToClean.coverArt.file.arrayBuffer()
+            );
+            cover = {
+              mimeType: fileToClean.coverArt.file.type || "image/jpeg",
+              data: cBytes,
+            };
+          } else if (
+            !options.removeCoverArt &&
+            fileToClean.originalCoverDataUrl &&
+            FORMATS.mp3.supportsCoverArt
+          ) {
+            const c = dataUrlToCover(fileToClean.originalCoverDataUrl);
+            if (c) cover = c;
+          }
+
+          const id3 = buildId3v2(tags, cover);
+          const finalLen = id3.byteLength + mp3Bytes.byteLength;
+          const finalBytes = new Uint8Array(finalLen);
+          if (id3.byteLength > 0) finalBytes.set(id3, 0);
+          finalBytes.set(mp3Bytes, id3.byteLength);
+          const blob = new Blob([finalBytes], { type: "audio/mpeg" });
+
+          // Don't touch bytesSinceResetRef here — we never used the wasm
+          // engine for this file, so it doesn't contribute to heap pressure.
+
+          updateFile(id, {
+            status: "done",
+            progress: 100,
+            cleanedBlob: blob,
+            cleanedExt: "mp3",
+          });
+          return;
+        }
+
+        phase = "load engine";
+        let ffmpeg = await loadEngine();
 
         // For WAV inputs we parse the RIFF in JS to extract just the PCM
         // payload, then re-wrap it in a freshly-built minimal RIFF/WAVE

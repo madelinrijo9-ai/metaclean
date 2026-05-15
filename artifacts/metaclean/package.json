@@ -82,6 +82,7 @@
     "zod": "catalog:"
   },
   "dependencies": {
+    "@breezystack/lamejs": "^1.2.7",
     "@ffmpeg/core": "^0.12.10",
     "music-metadata": "^11.12.3"
   }

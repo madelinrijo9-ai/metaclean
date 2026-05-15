@@ -218,6 +218,9 @@ importers:
 
   artifacts/metaclean:
     dependencies:
+      '@breezystack/lamejs':
+        specifier: ^1.2.7
+        version: 1.2.7
       '@ffmpeg/core':
         specifier: ^0.12.10
         version: 0.12.10
@@ -753,6 +756,9 @@ packages:
 
   '@borewit/text-codec@0.2.2':
     resolution: {integrity: sha512-DDaRehssg1aNrH4+2hnj1B7vnUGEjU6OIlyRdkMd0aUdIUvKXrJfXsy8LVtXAy7DRvYVluWbMspsRhz2lcW0mQ==}
+
+  '@breezystack/lamejs@1.2.7':
+    resolution: {integrity: sha512-6wc7ck65ctA75Hq7FYHTtTvGnYs6msgdxiSUICQ+A01nVOWg6rqouZB8IdyteRlfpYYiFovkf67dIeOgWIUzTA==}
 
   '@commander-js/extra-typings@14.0.0':
     resolution: {integrity: sha512-hIn0ncNaJRLkZrxBIp5AsW/eXEHNKYQBh0aPdoUqNgD+Io3NIykQqpKFyKcuasZhicGaEZJX/JBSIkZ4e5x8Dg==}
@@ -3402,6 +3408,8 @@ snapshots:
       '@babel/helper-validator-identifier': 7.28.5
 
   '@borewit/text-codec@0.2.2': {}
+
+  '@breezystack/lamejs@1.2.7': {}
 
   '@commander-js/extra-typings@14.0.0(commander@14.0.3)':
     dependencies:
