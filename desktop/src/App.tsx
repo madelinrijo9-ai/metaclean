@@ -530,12 +530,12 @@ function MainApp() {
   }, 0);
 
   return (
-    <div className="min-h-screen flex flex-col bg-background text-foreground selection:bg-primary/30 selection:text-primary">
+    <div className="min-h-screen flex flex-col text-foreground selection:bg-primary/30 selection:text-primary">
       <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
         <div className="container mx-auto max-w-6xl h-16 flex items-center justify-between px-4">
           <div className="flex items-center gap-3">
-            <div className="bg-primary text-primary-foreground p-1.5 rounded-md">
-              <ShieldCheck className="w-5 h-5" />
+            <div className="w-9 h-9 rounded-full overflow-hidden border-2 border-primary flex items-center justify-center bg-black/40">
+              <img src="/background-logo.jpg" alt="Logo" className="w-full h-full object-cover" />
             </div>
             <div className="flex flex-col leading-tight">
               <span className="font-bold text-lg tracking-tight">MetaClean</span>

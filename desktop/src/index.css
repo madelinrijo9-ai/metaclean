@@ -87,15 +87,15 @@
   --sidebar: 0 0% 96%;
   --sidebar-foreground: 0 0% 9%;
   --sidebar-border: 0 0% 88%;
-  --sidebar-primary: 24 95% 53%;
+  --sidebar-primary: 142 70% 45%;
   --sidebar-primary-foreground: 0 0% 100%;
   --sidebar-accent: 0 0% 94%;
   --sidebar-accent-foreground: 0 0% 9%;
-  --sidebar-ring: 24 95% 53%;
+  --sidebar-ring: 142 70% 45%;
   --popover: 0 0% 100%;
   --popover-foreground: 0 0% 9%;
   --popover-border: 0 0% 88%;
-  --primary: 24 95% 53%;
+  --primary: 142 70% 45%;
   --primary-foreground: 0 0% 100%;
   --secondary: 0 0% 92%;
   --secondary-foreground: 0 0% 9%;
@@ -106,8 +106,8 @@
   --destructive: 0 84% 60%;
   --destructive-foreground: 0 0% 100%;
   --input: 0 0% 88%;
-  --ring: 24 95% 53%;
-  --chart-1: 24 95% 53%;
+  --ring: 142 70% 45%;
+  --chart-1: 142 70% 45%;
   --chart-2: 0 0% 9%;
   --chart-3: 0 0% 40%;
   --chart-4: 0 0% 60%;
@@ -178,15 +178,15 @@
   --sidebar: 0 0% 10%;
   --sidebar-foreground: 0 0% 98%;
   --sidebar-border: 0 0% 15%;
-  --sidebar-primary: 24 95% 53%;
+  --sidebar-primary: 142 76% 45%;
   --sidebar-primary-foreground: 0 0% 100%;
   --sidebar-accent: 0 0% 18%;
   --sidebar-accent-foreground: 0 0% 98%;
-  --sidebar-ring: 24 95% 53%;
+  --sidebar-ring: 142 76% 45%;
   --popover: 0 0% 12%;
   --popover-foreground: 0 0% 98%;
   --popover-border: 0 0% 15%;
-  --primary: 24 95% 53%;
+  --primary: 142 76% 45%;
   --primary-foreground: 0 0% 100%;
   --secondary: 0 0% 18%;
   --secondary-foreground: 0 0% 98%;
@@ -199,8 +199,8 @@
 
   /* Used as the border around inputs. Dark mode: Should be a border that is light enough to have high contrast when rendered on a --card background. More contrast than standard --border */
   --input: 0 0% 25%;
-  --ring: 24 95% 53%;
-  --chart-1: 24 95% 53%;
+  --ring: 142 76% 45%;
+  --chart-1: 142 76% 45%;
   --chart-2: 0 0% 98%;
   --chart-3: 0 0% 60%;
   --chart-4: 0 0% 40%;
@@ -223,7 +223,17 @@
   }
 
   body {
-    @apply font-sans antialiased bg-background text-foreground;
+    @apply font-sans antialiased text-foreground;
+    background-color: #f9f9f9;
+    background-image: linear-gradient(rgba(249, 249, 249, 0.94), rgba(249, 249, 249, 0.94)), url('/background-logo.jpg');
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+    background-attachment: fixed;
+  }
+  .dark body {
+    background-color: #080808;
+    background-image: linear-gradient(rgba(8, 8, 8, 0.85), rgba(8, 8, 8, 0.85)), url('/background-logo.jpg');
   }
 }
 
@@ -336,5 +346,16 @@
   .border.active-elevate-2:not(.no-active-interaction-elevate)::after,
   .border.hover-elevate:not(.no-hover-interaction-elevate)::after {
     inset: -1px;
+  }
+
+  .bg-card {
+    background-color: rgba(255, 255, 255, 0.72) !important;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+  .dark .bg-card {
+    background-color: rgba(18, 18, 18, 0.75) !important;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
   }
 }
