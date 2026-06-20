@@ -9,4 +9,3 @@
 *.zip
 Dockerfile
 docker-compose.yml
-nginx.conf
