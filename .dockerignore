@@ -1,0 +1,12 @@
+**/node_modules
+**/target
+**/dist
+**/dmg
+**/build
+.git
+.local
+.agents
+*.zip
+Dockerfile
+docker-compose.yml
+nginx.conf

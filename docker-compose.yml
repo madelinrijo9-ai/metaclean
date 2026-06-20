@@ -1,0 +1,26 @@
+services:
+  metaclean:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: metaclean-web
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+
+  # OPTIONAL: Expose online via Cloudflare Tunnel to get a free domain!
+  # To use this:
+  # 1. Create a free tunnel on Cloudflare Zero Trust (https://one.dash.cloudflare.com/)
+  # 2. Point the tunnel hostname (e.g. metaclean.yourdomain.com) to: http://metaclean:80
+  # 3. Uncomment the configuration below, replace 'YOUR_CLOUDFLARE_TUNNEL_TOKEN' with your token, and run:
+  #    docker compose up -d --build
+  #
+  # tunnel:
+  #   image: cloudflare/cloudflared:latest
+  #   container_name: metaclean-tunnel
+  #   command: tunnel --no-autoupdate run
+  #   environment:
+  #     - TUNNEL_TOKEN=YOUR_CLOUDFLARE_TUNNEL_TOKEN
+  #   restart: unless-stopped
+  #   depends_on:
+  #     - metaclean
