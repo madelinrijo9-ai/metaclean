@@ -1,0 +1,29 @@
+[[permission]]
+identifier = "allow-save-secret"
+description = "Enables save_secret command"
+commands.allow = ["save_secret"]
+
+[[permission]]
+identifier = "allow-get-secret"
+description = "Enables get_secret command"
+commands.allow = ["get_secret"]
+
+[[permission]]
+identifier = "allow-delete-secret"
+description = "Enables delete_secret command"
+commands.allow = ["delete_secret"]
+
+[[permission]]
+identifier = "allow-save-file-native"
+description = "Enables save_file_native command"
+commands.allow = ["save_file_native"]
+
+[[permission]]
+identifier = "allow-save-cleaned-song"
+description = "Enables save_cleaned_song command"
+commands.allow = ["save_cleaned_song"]
+
+[[permission]]
+identifier = "allow-open-in-finder"
+description = "Enables open_in_finder command"
+commands.allow = ["open_in_finder"]

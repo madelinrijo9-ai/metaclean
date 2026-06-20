@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/capabilities.json",
+  "identifier": "default-capabilities",
+  "description": "Default capability for the MetaClean desktop application",
+  "windows": ["*"],
+  "permissions": [
+    "core:default",
+    "allow-save-secret",
+    "allow-get-secret",
+    "allow-delete-secret",
+    "allow-save-file-native",
+    "allow-save-cleaned-song",
+    "allow-open-in-finder",
+    "dialog:default",
+    "notification:default",
+    "clipboard-manager:default"
+  ]
+}
